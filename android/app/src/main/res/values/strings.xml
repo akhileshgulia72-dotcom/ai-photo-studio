@@ -1,0 +1,5 @@
+<resources>
+    <string name="accessibility_service_description">
+    Focus Mode detects when you open an app that you selected for blocking during an active focus session. It is used only to help you stay focused.
+</string>
+</resources>

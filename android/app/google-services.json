@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "516306315147",
+    "project_id": "ai-note-scanner",
+    "storage_bucket": "ai-note-scanner.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:516306315147:android:83907bfccab36e1442318e",
+        "android_client_info": {
+          "package_name": "com.agdevelops.ainotescanner"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDTfabo3gTOls7wsGHVjySKtUDUwTo40yE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:516306315147:android:6a11be494e442c6f42318e",
+        "android_client_info": {
+          "package_name": "com.example.ai_note_scanner"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDTfabo3gTOls7wsGHVjySKtUDUwTo40yE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
