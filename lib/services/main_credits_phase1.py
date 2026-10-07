@@ -8,7 +8,6 @@ Required environment variables:
     OPENAI_API_KEY=...
 Optional:
     OPENAI_MODEL=gpt-image-2.5-sunburst
-    OPENAI_QUALITY=medium
     OPENAI_SIZE=1024x1536
     OPENAI_TIMEOUT=240
     MAX_UPLOAD_MB=20
@@ -50,7 +49,7 @@ from PIL import Image, ImageDraw, ImageFilter
 
 import firebase_admin
 from firebase_admin import auth as firebase_auth
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, storage
 
 load_dotenv()
 
@@ -60,6 +59,10 @@ load_dotenv()
 
 FIREBASE_SERVICE_ACCOUNT_JSON = os.getenv(
     "FIREBASE_SERVICE_ACCOUNT_JSON",
+).strip()
+FIREBASE_STORAGE_BUCKET = os.getenv(
+    "FIREBASE_STORAGE_BUCKET",
+    "ai-note-scanner.firebasestorage.app",
 ).strip()
 
 if not FIREBASE_SERVICE_ACCOUNT_JSON:
@@ -77,9 +80,13 @@ if not firebase_admin._apps:
     firebase_cred = credentials.Certificate(
         FIREBASE_SERVICE_ACCOUNT_JSON
     )
-    firebase_admin.initialize_app(firebase_cred)
+    firebase_admin.initialize_app(
+        firebase_cred,
+        {"storageBucket": FIREBASE_STORAGE_BUCKET},
+    )
 
 db = firestore.client()
+bucket = storage.bucket()
 
 
 # ---------------------------------------------------------------------------
@@ -88,12 +95,13 @@ db = firestore.client()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-image-2.5-sunburst").strip()
-OPENAI_QUALITY = os.getenv("OPENAI_QUALITY", "medium").strip().lower()
+# Pin image edits to medium quality instead of honoring stale low overrides.
+OPENAI_QUALITY = "medium"
 OPENAI_SIZE = os.getenv("OPENAI_SIZE", "1024x1536").strip()
 OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "240"))
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "20"))
 GENERATION_COST = 10
-AD_REWARD_CREDITS = 5
+AD_REWARD_CREDITS = 3
 
 ALLOWED_QUALITIES: Final = {"low", "medium", "high", "xhigh", "max", "auto"}
 ALLOWED_SIZES: Final = {
@@ -607,10 +615,12 @@ def build_professional_prompt(
 
     if face_count:
         mask_instruction = """
-A face-protection mask is provided with this edit.
-Treat the protected facial/head regions as locked identity reference areas.
-Do not redesign, regenerate, beautify, reshape or reinterpret those regions.
-The protected areas should remain visually consistent with the source.
+A face-protection mask is provided. The source face, ears, hairline and hair
+are locked. Preserve their appearance exactly: do not change the identity,
+expression, smile, gaze, skin tone, facial structure, or hair. Do not redraw,
+replace, regenerate, retouch, smooth, beautify, sharpen, relight, recolor or
+apply makeup to those regions. Never add a smile or change the source mouth or
+teeth. If any template direction conflicts with this lock, preserve the source.
 """
     else:
         mask_instruction = """
@@ -647,6 +657,11 @@ Preserve whenever visible:
 - recognizable expression unless a different expression is explicitly requested
 
 {mask_instruction}
+
+ABSOLUTE FACE LOCK — applies to every template
+Keep the exact source facial expression, mouth position and teeth. Never add a
+smile. Do not change the face, skin, eyes, ears, hairline or hairstyle. Apply
+the requested style only outside protected face and head regions.
 
 EDIT SCOPE
 Change only the visual elements required by the selected template.
@@ -858,7 +873,7 @@ async def get_profile(
 ):
     """Return the authenticated user's photo-studio profile.
 
-    The backend creates the profile with the initial 10 credits the first
+    The backend creates the profile with the initial 5 credits the first
     time the user calls this endpoint. Flutter cannot write this document
     because Firestore client rules deny create/update/delete.
     """
@@ -870,7 +885,7 @@ async def get_profile(
 
     if not user_snapshot.exists:
         user_data = {
-            "credits": 10,
+            "credits": 5,
             "plan": "free",
             "totalGenerations": 0,
             "createdAt": firestore.SERVER_TIMESTAMP,
@@ -880,19 +895,31 @@ async def get_profile(
         user_ref.set(user_data)
 
         logger.info(
-            "Created new photo-studio profile | uid=%s | credits=10",
+            "Created new photo-studio profile | uid=%s | credits=5",
             uid,
         )
 
         return {
             "success": True,
             "uid": uid,
-            "credits": 10,
+            "credits": 5,
             "plan": "free",
             "totalGenerations": 0,
         }
 
     data = user_snapshot.to_dict() or {}
+
+    # Keep non-sensitive Google profile metadata synchronized for the VYRO
+    # profile screen. Firebase ID-token claims are server-verified above.
+    profile_updates = {}
+    for claim_key, field_name in (("name", "displayName"), ("email", "email"), ("picture", "photoUrl")):
+        value = decoded_token.get(claim_key)
+        if value:
+            profile_updates[field_name] = value
+    if profile_updates:
+        profile_updates["updatedAt"] = firestore.SERVER_TIMESTAMP
+        user_ref.set(profile_updates, merge=True)
+        data.update(profile_updates)
 
     return {
         "success": True,
@@ -900,6 +927,10 @@ async def get_profile(
         "credits": int(data.get("credits", 0)),
         "plan": data.get("plan", "free"),
         "totalGenerations": int(data.get("totalGenerations", 0)),
+        "displayName": data.get("displayName"),
+        "email": data.get("email"),
+        "photoUrl": data.get("photoUrl"),
+        "isAnonymous": bool(decoded_token.get("firebase", {}).get("sign_in_provider") == "anonymous"),
     }
 
 
@@ -922,7 +953,7 @@ def reserve_generation_credits(uid: str, request_id: str) -> None:
         snapshot = user_ref.get(transaction=transaction)
 
         if not snapshot.exists:
-            credits = 10
+            credits = 5
             transaction.create(
                 user_ref,
                 {
@@ -1077,7 +1108,7 @@ async def reward_ad(
     rewardId: str = Form(...),
     authorization: str | None = Header(default=None),
 ):
-    """Grant +5 credits after Flutter receives AdMob's earned-reward callback.
+    """Grant +3 credits after Flutter receives AdMob's earned-reward callback.
 
     Phase 1 uses a one-time rewardId to prevent accidental duplicate grants.
     Production should additionally use AdMob server-side verification (SSV)
@@ -1159,6 +1190,115 @@ async def reward_ad(
         "creditsAwarded": AD_REWARD_CREDITS if granted else 0,
         "credits": credits,
     }
+
+
+# ---------------------------------------------------------------------------
+# Persistent creation storage
+# ---------------------------------------------------------------------------
+
+def _creation_signed_url(storage_path: str) -> str:
+    """Return a short-lived read URL for a private Firebase Storage object."""
+    blob = bucket.blob(storage_path)
+    return blob.generate_signed_url(
+        version="v4",
+        expiration=60 * 60 * 24,
+        method="GET",
+    )
+
+
+def save_creation(
+    uid: str,
+    request_id: str,
+    output_bytes: bytes,
+    template_id: str,
+    prompt: str,
+    negative_prompt: str,
+) -> tuple[str, str]:
+    """Upload a completed generation and create its Firestore history record."""
+    storage_path = f"creations/{uid}/{request_id}.jpg"
+    blob = bucket.blob(storage_path)
+    blob.upload_from_string(output_bytes, content_type="image/jpeg")
+
+    creation_ref = db.collection("generations").document(request_id)
+    creation_ref.set(
+        {
+            "id": request_id,
+            "uid": uid,
+            "templateId": template_id,
+            "prompt": prompt,
+            "negativePrompt": negative_prompt,
+            "storagePath": storage_path,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+            "model": OPENAI_MODEL,
+            "status": "completed",
+        }
+    )
+    return request_id, _creation_signed_url(storage_path)
+
+
+@app.get("/v1/my-creations")
+async def get_my_creations(
+    authorization: str | None = Header(default=None),
+):
+    """Return the authenticated user's persistent creation history."""
+    decoded_token = verify_firebase_user(authorization)
+    uid = decoded_token["uid"]
+
+    query = (
+        db.collection("generations")
+        .where("uid", "==", uid)
+        .limit(100)
+        .stream()
+    )
+
+    items = []
+    for doc in query:
+        data = doc.to_dict() or {}
+        storage_path = data.get("storagePath")
+        image_url = (
+            _creation_signed_url(storage_path)
+            if storage_path
+            else data.get("imageUrl")
+        )
+        items.append(
+            {
+                "id": data.get("id", doc.id),
+                "templateId": data.get("templateId", ""),
+                "imageUrl": image_url,
+                "createdAt": str(data.get("createdAt", "")),
+            }
+        )
+
+    items.sort(key=lambda item: item.get("createdAt", ""), reverse=True)
+    return {"success": True, "items": items}
+
+
+@app.delete("/v1/my-creations/{creation_id}")
+async def delete_my_creation(
+    creation_id: str,
+    authorization: str | None = Header(default=None),
+):
+    """Delete one creation only when it belongs to the authenticated user."""
+    decoded_token = verify_firebase_user(authorization)
+    uid = decoded_token["uid"]
+
+    ref = db.collection("generations").document(creation_id)
+    snapshot = ref.get()
+    if not snapshot.exists:
+        raise HTTPException(status_code=404, detail="Creation not found.")
+
+    data = snapshot.to_dict() or {}
+    if data.get("uid") != uid:
+        raise HTTPException(status_code=403, detail="You cannot delete this creation.")
+
+    storage_path = data.get("storagePath")
+    if storage_path:
+        blob = bucket.blob(storage_path)
+        if blob.exists():
+            blob.delete()
+
+    ref.delete()
+    return {"success": True, "deleted": creation_id}
 
 
 # ---------------------------------------------------------------------------
@@ -1249,13 +1389,13 @@ async def create_generation(
             final_prompt,
         )
 
-        filename = f"generated_{request_id}.jpg"
-        output_file = OUTPUT_DIR / filename
-        output_file.write_bytes(output_bytes)
-
-        output_url = (
-            str(request.base_url).rstrip("/")
-            + f"/test-output/{filename}"
+        _, output_url = save_creation(
+            uid=uid,
+            request_id=request_id,
+            output_bytes=output_bytes,
+            template_id=templateId,
+            prompt=prompt,
+            negative_prompt=negativePrompt,
         )
 
         complete_generation(uid, request_id)

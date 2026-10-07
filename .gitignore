@@ -66,3 +66,27 @@ backend/.ruff_cache/
 # Local IDE
 .vscode/
 backend/serviceAccountKey.json
+
+# ---------------------------------------------------------------------------
+# Signing credentials and Apple secrets. Never commit these.
+# ---------------------------------------------------------------------------
+*.p12
+*.pfx
+*.cer
+*.certSigningRequest
+*.mobileprovision
+*.provisionprofile
+ios/key.properties
+android/key.properties
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/test_output
+
+# Injected by CI (see .github/workflows/ios-release.yml) or downloaded from the
+# Firebase Console. It maps to the iOS app registration, so it is kept out of
+# the repository and handled as a secret.
+ios/Runner/GoogleService-Info.plist
+
+# App Store Connect API keys
+AuthKey_*.p8
+*.p8

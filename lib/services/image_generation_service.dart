@@ -2,19 +2,34 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:http/http.dart' as http;
 
 import '../models/photo_template.dart';
+import 'api_config.dart';
 
 class GenerationException implements Exception {
-  const GenerationException(this.message);
+  const GenerationException(this.message, {this.insufficientCredits = false});
   final String message;
+  final bool insufficientCredits;
   @override
   String toString() => message;
 }
 
+class GeneratedImage {
+  const GeneratedImage({
+    required this.generationId,
+    required this.storagePath,
+    this.imageUrl,
+  });
+
+  final String generationId;
+  final String storagePath;
+  final Uri? imageUrl;
+}
+
 abstract interface class ImageGenerationService {
-  Future<Uri> generateImage({
+  Future<GeneratedImage> generateImage({
     required File sourceImage,
     required PhotoTemplate template,
   });
@@ -26,14 +41,13 @@ abstract interface class ImageGenerationService {
 class BackendImageGenerationService implements ImageGenerationService {
   BackendImageGenerationService({http.Client? client, String? baseUrl})
     : _client = client ?? http.Client(),
-      _baseUrl =
-          baseUrl ?? const String.fromEnvironment('GENERATION_API_BASE_URL');
+      _baseUrl = baseUrl ?? generationApiBaseUrl;
 
   final http.Client _client;
   final String _baseUrl;
 
   @override
-  Future<Uri> generateImage({
+  Future<GeneratedImage> generateImage({
     required File sourceImage,
     required PhotoTemplate template,
   }) async {
@@ -74,27 +88,60 @@ class BackendImageGenerationService implements ImageGenerationService {
     try {
       final streamed = await _client
           .send(request)
-          .timeout(const Duration(minutes: 3));
+          .timeout(const Duration(minutes: 6));
       final response = await http.Response.fromStream(streamed);
       if (response.statusCode < 200 || response.statusCode >= 300) {
         if (response.statusCode == 402) {
           throw const GenerationException(
             'You need more credits to create this photo.',
+            insufficientCredits: true,
           );
+        }
+        if (response.statusCode == 422) {
+          try {
+            final body = jsonDecode(response.body);
+            final detail = body is Map ? body['detail']?.toString() : null;
+            if (detail != null && detail.isNotEmpty) {
+              throw GenerationException(detail);
+            }
+          } on FormatException {
+            // Use the generic, non-sensitive message below for malformed errors.
+          }
         }
         throw const GenerationException(
           'Something went wrong while creating your photo. Your credit was not charged. Try again.',
         );
       }
       final body = jsonDecode(response.body);
-      final url = body is Map ? body['outputImageUrl']?.toString() : null;
-      final uri = Uri.tryParse(url ?? '');
-      if (uri == null || !uri.hasScheme) {
+      final generationId = body is Map
+          ? body['generationId']?.toString()
+          : null;
+      final storagePath = body is Map ? body['storagePath']?.toString() : null;
+      if (generationId == null || generationId.isEmpty || storagePath == null) {
         throw const GenerationException(
-          'The server returned an invalid image. Please try again.',
+          'The server did not return a valid saved image. Please try again.',
         );
       }
-      return uri;
+      final expectedPrefix = 'users/${user.uid}/generations/';
+      if (!storagePath.startsWith(expectedPrefix) || storagePath.contains('..') || storagePath.contains('\\')) {
+        throw const GenerationException(
+          'The server did not return a valid saved image. Please try again.',
+        );
+      }
+      Uri? uri;
+      try {
+        final downloadUrl = await FirebaseStorage.instance
+            .ref(storagePath)
+            .getDownloadURL();
+        uri = Uri.tryParse(downloadUrl);
+      } on FirebaseException {
+        // The result screen can retry URL resolution from the durable path.
+      }
+      return GeneratedImage(
+        generationId: generationId,
+        storagePath: storagePath,
+        imageUrl: uri,
+      );
     } on GenerationException {
       rethrow;
     } on SocketException {

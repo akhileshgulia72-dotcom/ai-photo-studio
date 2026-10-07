@@ -12,7 +12,36 @@
           "package_name": "com.agdevelops.ainotescanner"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "516306315147-2hujrskaeqnslkbe9e55ccndqkvfgmip.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.agdevelops.ainotescanner",
+            "certificate_hash": "c199c085cbfebf358417e78ed318bca4516d59ab"
+          }
+        },
+        {
+          "client_id": "516306315147-noj3icojc97go286knl0tl22v6oki2v8.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.agdevelops.ainotescanner",
+            "certificate_hash": "a81119f077f72d9b8cdbead7e395881f85691745"
+          }
+        },
+        {
+          "client_id": "516306315147-v7pqr26tak6kv9qeco7smpmlf0eilinq.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.agdevelops.ainotescanner",
+            "certificate_hash": "82e8da7f6e8c61daf771240637e951fb79b9f173"
+          }
+        },
+        {
+          "client_id": "516306315147-afi4ibn72nha03d9j8u3dkkjg5ca49ca.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyDTfabo3gTOls7wsGHVjySKtUDUwTo40yE"
@@ -20,7 +49,19 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "516306315147-afi4ibn72nha03d9j8u3dkkjg5ca49ca.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "516306315147-tpj7afcegjht29kb214hqmgmf47sg2va.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.aiNoteScanner"
+              }
+            }
+          ]
         }
       }
     },
@@ -31,7 +72,12 @@
           "package_name": "com.example.ai_note_scanner"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "516306315147-afi4ibn72nha03d9j8u3dkkjg5ca49ca.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyDTfabo3gTOls7wsGHVjySKtUDUwTo40yE"
@@ -39,7 +85,19 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "516306315147-afi4ibn72nha03d9j8u3dkkjg5ca49ca.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "516306315147-tpj7afcegjht29kb214hqmgmf47sg2va.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.aiNoteScanner"
+              }
+            }
+          ]
         }
       }
     }

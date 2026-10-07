@@ -1,8 +1,10 @@
 name: ai_photo_studio
+
 description: "Choose a look, upload a photo, and create something extraordinary."
+
 publish_to: 'none'
 
-version: 1.0.0+14
+version: 1.0.0+17
 
 environment:
   sdk: ^3.12.2
@@ -13,23 +15,39 @@ dependencies:
 
   cupertino_icons: ^1.0.8
 
+  # Firebase
   firebase_core: ^4.14.0
   firebase_auth: ^6.6.1
   cloud_firestore: ^6.9.0
+  firebase_storage: ^13.6.0
   firebase_app_check: ^0.4.7
+
+  # Google Sign-In
+  google_sign_in: ^7.2.0
+
+  # Purchases
   in_app_purchase: ^3.3.1
+  crypto: ^3.0.7
 
+  # Image
   image_picker: ^1.2.3
+  image_cropper: ^12.2.1
 
+  # Ads
   google_mobile_ads: 9.0.0
+
+  # Network / Storage / Sharing
   http: ^1.6.0
+  path_provider: ^2.1.5
+  share_plus: ^12.0.1
+  url_launcher: ^6.3.2
+  image: 4.10.1
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
 
   flutter_lints: ^6.0.0
-
   flutter_launcher_icons: ^0.14.4
 
 flutter_launcher_icons:
@@ -40,5 +58,7 @@ flutter_launcher_icons:
 flutter:
   uses-material-design: true
 
-
-
+  assets:
+    - assets/templates/
+    - assets/images/
+    - assets/backgrounds/

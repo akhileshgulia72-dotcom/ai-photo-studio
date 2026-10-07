@@ -1,0 +1,14 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /users/{uid}/generations/{generationFile} {
+      allow read: if request.auth != null
+                  && request.auth.uid == uid
+                  && generationFile.matches('.*[.]png');
+      allow write: if false;
+    }
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,296 @@
+name: iOS Release
+
+# Builds VYRO for iOS and, when signing credentials are present, archives and
+# uploads the build to TestFlight.
+#
+# When signing secrets are absent the workflow still compiles the release build
+# and uploads the unsigned .app, so pull requests stay meaningful before the
+# Apple account is wired up.
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      upload_to_testflight:
+        description: 'Upload to TestFlight when credentials are configured'
+        type: boolean
+        default: true
+
+concurrency:
+  group: ios-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Production backend. Overridable with a repository variable so the test
+  # revision can be used without editing this file. Never commit a test URL as
+  # the shipped default.
+  GENERATION_API_BASE_URL: ${{ vars.GENERATION_API_BASE_URL || 'https://vyro-api-jnz6yqjl4a-el.a.run.app' }}
+  FLUTTER_VERSION: '3.44.2'
+  BUNDLE_ID: 'com.agdevelops.ainotescanner'
+  SCHEME: 'Runner'
+  WORKSPACE: 'ios/Runner.xcworkspace'
+
+jobs:
+  ios:
+    name: Analyze, test, build iOS
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    env:
+      # CFBundleShortVersionString comes from pubspec.yaml (1.0.0). The build
+      # number must increase for every TestFlight upload, so it is derived from
+      # the workflow run number.
+      FLUTTER_BUILD_NAME: '1.0.0'
+      FLUTTER_BUILD_NUMBER: ${{ github.run_number }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------- setup
+      - name: Select the newest available Xcode
+        run: |
+          set -euo pipefail
+          LATEST=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$LATEST" ]; then
+            echo "Using $LATEST"
+            sudo xcode-select -s "$LATEST/Contents/Developer"
+          else
+            echo "Using the runner image default Xcode"
+          fi
+          xcodebuild -version
+          xcode-select -p
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Flutter environment info
+        run: flutter --version
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Verify the FlutterFire configuration is committed
+        run: |
+          set -euo pipefail
+          test -f lib/firebase_options.dart \
+            || { echo "::error::lib/firebase_options.dart is missing. VYRO initialises Firebase from this file."; exit 1; }
+          echo "lib/firebase_options.dart present."
+
+      # ------------------------------------------------------- detect secrets
+      - name: Preflight - detect configured credentials
+        id: preflight
+        env:
+          CERT: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          CERT_PW: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+          KEYCHAIN_PW: ${{ secrets.KEYCHAIN_PASSWORD }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          # Signing is all-or-nothing. Missing secrets simply disable the signed
+          # path; a partial set is a configuration error.
+          signing=0
+          if [ -n "${CERT:-}" ] && [ -n "${PROFILE:-}" ] && [ -n "${CERT_PW:-}" ] && [ -n "${KEYCHAIN_PW:-}" ]; then
+            signing=1
+          elif [ -n "${CERT:-}" ] || [ -n "${PROFILE:-}" ]; then
+            echo "::error::Partial signing configuration. IOS_CERTIFICATE_BASE64, IOS_CERTIFICATE_PASSWORD, IOS_PROVISIONING_PROFILE_BASE64 and KEYCHAIN_PASSWORD must all be set together."
+            exit 1
+          fi
+          echo "signing=$signing" >> "$GITHUB_OUTPUT"
+
+          can_upload=0
+          if [ "$signing" = "1" ] && [ -n "${ASC_KEY_ID:-}" ] && [ -n "${ASC_ISSUER:-}" ] && [ -n "${ASC_KEY:-}" ]; then
+            can_upload=1
+          fi
+          echo "can_upload=$can_upload" >> "$GITHUB_OUTPUT"
+
+          echo "Signing configured: $signing"
+          echo "TestFlight upload possible: $can_upload"
+
+          if [ "$signing" = "0" ]; then
+            echo "::warning::No signing secrets configured. This run builds unsigned and skips the archive and TestFlight upload."
+          fi
+
+      # ------------------------------------------------------- iOS config files
+      - name: Verify the iOS AdMob application id
+        run: |
+          set -euo pipefail
+          PLIST="ios/Runner/Info.plist"
+          GAD_ID=$(/usr/libexec/PlistBuddy -c 'Print :GADApplicationIdentifier' "$PLIST")
+          echo "GADApplicationIdentifier = ${GAD_ID}"
+
+          # An iOS AdMob application id uses '~' and must belong to the VYRO
+          # AdMob account. The Android id uses the same format, so also reject
+          # the known Android value to catch a copy-paste.
+          case "$GAD_ID" in
+            ca-app-pub-7694497723149363~*)
+              ;;
+            *)
+              echo "::error::GADApplicationIdentifier is not a VYRO iOS AdMob application id: ${GAD_ID}"
+              exit 1
+              ;;
+          esac
+
+          if [ "$GAD_ID" = "ca-app-pub-7694497723149363~1446706318" ]; then
+            echo "::error::Info.plist is using the Android AdMob application id on iOS."
+            exit 1
+          fi
+          echo "AdMob application id check passed."
+
+      - name: Install GoogleService-Info.plist
+        env:
+          GSP_B64: ${{ secrets.GOOGLE_SERVICE_INFO_PLIST_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GSP_B64:-}" ]; then
+            echo "::notice::GOOGLE_SERVICE_INFO_PLIST_BASE64 is not set. VYRO initialises Firebase from lib/firebase_options.dart, so the app still starts; iOS Google Sign-In may require this file."
+            exit 0
+          fi
+          echo "$GSP_B64" | base64 --decode > ios/Runner/GoogleService-Info.plist
+          echo "BUNDLE_ID = $(/usr/libexec/PlistBuddy -c 'Print :BUNDLE_ID' ios/Runner/GoogleService-Info.plist)"
+          echo "PROJECT_ID = $(/usr/libexec/PlistBuddy -c 'Print :PROJECT_ID' ios/Runner/GoogleService-Info.plist)"
+
+      # ------------------------------------------------------------ validation
+      - name: Run Flutter tests
+        run: flutter test
+
+      - name: Analyze (flutter analyze)
+        run: flutter analyze
+
+      # ------------------------------------------------------------ code sign
+      - name: Import signing certificate and provisioning profile
+        if: steps.preflight.outputs.signing == '1'
+        env:
+          CERT_B64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          CERT_PW: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          PROFILE_B64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+          KEYCHAIN_PW: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          CERT_PATH="$RUNNER_TEMP/distribution.p12"
+          PROFILE_PATH="$RUNNER_TEMP/profile.mobileprovision"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+
+          echo "$CERT_B64" | base64 --decode > "$CERT_PATH"
+          echo "$PROFILE_B64" | base64 --decode > "$PROFILE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+
+          security import "$CERT_PATH" -P "$CERT_PW" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PW" "$KEYCHAIN_PATH" >/dev/null
+
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp "$PROFILE_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/
+
+          # Make the temporary keychain visible to codesign.
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+          echo "Installed the distribution certificate and provisioning profile."
+
+      # ------------------------------------------------------------ CocoaPods
+      - name: Install CocoaPods dependencies
+        run: |
+          set -euo pipefail
+          # Every iOS plugin resolves through CocoaPods (Swift Package Manager is
+          # disabled for iOS) and ios/Podfile is committed, so this is the
+          # authoritative dependency install before Xcode builds the workspace.
+          test -f ios/Podfile || { echo "::error::ios/Podfile is missing."; exit 1; }
+          cd ios
+          pod repo update
+          pod install
+
+      # ---------------------------------------------------------------- build
+      - name: Build iOS release (unsigned)
+        if: steps.preflight.outputs.signing != '1'
+        run: |
+          set -euo pipefail
+          flutter build ios --release --no-codesign \
+            --build-name="${FLUTTER_BUILD_NAME}" \
+            --build-number="${FLUTTER_BUILD_NUMBER}" \
+            --dart-define=GENERATION_API_BASE_URL="${GENERATION_API_BASE_URL}"
+
+      - name: Build iOS archive and IPA
+        if: steps.preflight.outputs.signing == '1'
+        run: |
+          set -euo pipefail
+          flutter build ipa --release \
+            --build-name="${FLUTTER_BUILD_NAME}" \
+            --build-number="${FLUTTER_BUILD_NUMBER}" \
+            --dart-define=GENERATION_API_BASE_URL="${GENERATION_API_BASE_URL}" \
+            --export-options-plist=ios/ExportOptions.plist
+
+      - name: Confirm the production backend is baked in
+        run: |
+          set -euo pipefail
+          echo "GENERATION_API_BASE_URL=${GENERATION_API_BASE_URL}"
+          case "${GENERATION_API_BASE_URL}" in
+            *v2fixed*) echo "::error::The v2fixed test revision must not be used for an App Store build."; exit 1 ;;
+          esac
+          echo "Backend URL check passed."
+
+      # ------------------------------------------------------------- artefacts
+      - name: Upload the unsigned .app
+        if: steps.preflight.outputs.signing != '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: VYRO-ios-unsigned-${{ github.run_number }}
+          path: build/ios/iphoneos/Runner.app
+          if-no-files-found: error
+
+      - name: Upload the IPA
+        if: steps.preflight.outputs.signing == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: VYRO-ipa-${{ github.run_number }}
+          path: build/ios/ipa/*.ipa
+          if-no-files-found: error
+
+      # ------------------------------------------------------------ TestFlight
+      - name: Upload to TestFlight
+        if: |
+          steps.preflight.outputs.can_upload == '1' &&
+          (github.event_name != 'workflow_dispatch' || inputs.upload_to_testflight)
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          KEY_DIR="$RUNNER_TEMP/private_keys"
+          mkdir -p "$KEY_DIR"
+          printf '%s' "$ASC_PRIVATE_KEY" > "$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"
+          chmod 600 "$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"
+
+          IPA=$(ls build/ios/ipa/*.ipa | head -1)
+          echo "Uploading $IPA"
+
+          xcrun altool --upload-app \
+            --type ios \
+            --file "$IPA" \
+            --apiKey "$ASC_KEY_ID" \
+            --apiIssuer "$ASC_ISSUER_ID" \
+            --private-keys-dir "$KEY_DIR" \
+            --verbose
+
+          echo "Uploaded to App Store Connect. Processing usually takes 5-15 minutes."
+
+      - name: Clean up the temporary keychain
+        if: always() && steps.preflight.outputs.signing == '1'
+        run: |
+          security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" || true

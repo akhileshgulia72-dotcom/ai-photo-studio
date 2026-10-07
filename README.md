@@ -16,9 +16,55 @@ Firebase initialization and anonymous authentication run after the first frame. 
 The Flutter app contains no image-provider secret. To enable generation, deploy a backend and start the app with:
 
 ```sh
-flutter run --dart-define=GENERATION_API_BASE_URL=https://YOUR_BACKEND
+flutter run --dart-define=GENERATION_API_BASE_URL=https://vyro-api-jnz6yqjl4a-el.a.run.app
 ```
 
 The client sends `POST /v1/generations` as multipart form data with fields `templateId`, `prompt`, and `negativePrompt`, an `image` file, and the Firebase ID token in `Authorization: Bearer ...`. A successful backend response must include `outputImageUrl`.
 
-The backend is not included or deployed in this project yet. It must validate Firebase authentication and credits server-side, call the selected image provider (initially FLUX.2 Klein 4B), store output in Firebase Storage, and return the resulting URL. Keep provider keys in the backend secret manager. Without a configured backend URL, Generate shows an explicit setup message.
+The FastAPI backend is in `backend/` and is designed for Cloud Run in the same Google Cloud project as Firebase. It validates Firebase ID tokens, manages credits, stores generated images in private Firebase Storage, and records generation metadata in Firestore. Keep provider keys in Secret Manager. The app defaults to `https://vyro-api-jnz6yqjl4a-el.a.run.app`; override it with `--dart-define=GENERATION_API_BASE_URL=...` only when the service URL changes.
+
+
+## Release ad configuration
+
+Debug builds use Google's test ad units. Release builds read the native and interstitial ad unit IDs from build-time defines. Set the IDs created in your AdMob account; the interstitial ID is not currently present in this repository.
+
+```sh
+flutter build appbundle --release \
+  --dart-define=GENERATION_API_BASE_URL=https://vyro-api-jnz6yqjl4a-el.a.run.app \
+  --dart-define=NATIVE_AD_UNIT_ID=ca-app-pub-XXXX/NNNN \
+  --dart-define=INTERSTITIAL_AD_UNIT_ID=ca-app-pub-XXXX/NNNN
+```
+
+The app skips those ad formats in release when an ID is not supplied. Ad entitlement lookup fails closed, so ads are hidden when the paid plan cannot be verified.
+
+## iOS
+
+See [IOS_RELEASE.md](IOS_RELEASE.md) for the full iOS build, signing, and TestFlight guide, including the exact GitHub Secrets required.
+
+| Item | Value |
+|---|---|
+| Bundle identifier | `com.agdevelops.ainotescanner` |
+| iOS deployment target | `15.0` |
+| Workflow | `.github/workflows/ios-release.yml` |
+| Runner | `macos-15` |
+| Flutter | `3.44.2` |
+| Production backend | `https://vyro-api-jnz6yqjl4a-el.a.run.app` |
+
+```sh
+# Production iOS build (on macOS):
+flutter build ipa --release \
+  --dart-define=GENERATION_API_BASE_URL=https://vyro-api-jnz6yqjl4a-el.a.run.app
+```
+
+Push to `main`, push a `v*` tag, or run the **iOS Release** workflow manually to build and (when signing credentials are configured) upload to TestFlight.
+
+The iOS AdMob app id lives in `Info.plist`; ad unit ids are chosen per platform in Dart, so Android keeps its existing units:
+
+| Format | Android | iOS |
+|---|---|---|
+| Rewarded | `…/9751807400` | `…/8453252739` |
+| Interstitial | `…/7630322351` | `…/8336693504` |
+| Native | `…/6374835026` | `…/7462595539` |
+
+Remaining pre-flight items are the Apple signing credentials, the Firebase iOS app registration, and the App Store Connect in-app purchase products. See [IOS_RELEASE.md](IOS_RELEASE.md) section 7.
+

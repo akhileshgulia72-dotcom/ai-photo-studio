@@ -26,6 +26,18 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>GADApplicationIdentifier</key>
+	<string>ca-app-pub-7694497723149363~7064149443</string>
+	<key>NSUserTrackingUsageDescription</key>
+	<string>VYRO uses this to show you relevant ads and keep AI photo generation free.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>VYRO needs camera access so you can take a photo to transform with AI templates.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>VYRO needs access to your photos so you can choose an image to transform with AI templates.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>VYRO saves your AI-generated photos to your photo library.</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

@@ -1,13 +1,6 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:http/http.dart' as http;
 import '../services/rewarded_ad_service.dart';
-
-const String _apiBaseUrl = String.fromEnvironment(
-  'GENERATION_API_BASE_URL',
-  defaultValue: 'http://10.0.2.2:8000',
-);
+import '../services/account_profile_service.dart';
 
 const _bg = Color(0xFF0D0B12);
 const _panel = Color(0xFF191521);
@@ -29,51 +22,35 @@ class _CreditsScreenState extends State<CreditsScreen> {
   bool loadingCredits = true;
   bool watchingAd = false;
 
-  static const int rewardAmount = 5;
+  static const int firstRewardAmount = 5;
 
   @override
   void initState() {
     super.initState();
-    RewardedAdService.preloadRewardedAd();
     _loadCredits();
+    RewardedAdService.preloadRewardedAd();
   }
 
-  Future<void> _loadCredits() async {
-    if (mounted) setState(() => loadingCredits = true);
+  Future<void> _loadCredits({bool showLoading = true}) async {
+    if (showLoading && mounted) {
+      setState(() => loadingCredits = true);
+    }
+
     try {
-      User? user = FirebaseAuth.instance.currentUser;
-      if (user == null) {
-        await FirebaseAuth.instance.authStateChanges().firstWhere((u) => u != null);
-        user = FirebaseAuth.instance.currentUser;
-      }
-      if (user == null) throw StateError('Firebase authentication is not ready.');
-
-      final token = await user.getIdToken(true);
-      if (token == null || token.isEmpty) {
-        throw StateError('Firebase ID token is unavailable.');
-      }
-
-      final response = await http.get(
-        Uri.parse('$_apiBaseUrl/v1/profile'),
-        headers: {'Authorization': 'Bearer $token'},
-      ).timeout(const Duration(seconds: 15));
-
-      debugPrint('CreditsScreen: profile ${response.statusCode} ${response.body}');
-
-      if (response.statusCode != 200) {
-        throw StateError('Profile API returned HTTP ${response.statusCode}.');
-      }
-
-      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final profile = await AccountProfileService.instance.refresh(
+        forceTokenRefresh: true,
+      );
       if (!mounted) return;
       setState(() {
-        credits = (data['credits'] as num?)?.toInt() ?? 0;
-        plan = (data['plan'] as String?) ?? 'free';
+        credits = profile.credits;
+        plan = profile.plan;
         loadingCredits = false;
       });
     } catch (error) {
-      debugPrint('CreditsScreen: failed to fetch credits: $error');
-      if (mounted) setState(() => loadingCredits = false);
+      debugPrint('CreditsScreen: failed to load balance: $error');
+      if (mounted) {
+        setState(() => loadingCredits = false);
+      }
     }
   }
 
@@ -81,60 +58,54 @@ class _CreditsScreenState extends State<CreditsScreen> {
     if (watchingAd) return;
 
     setState(() => watchingAd = true);
-    try {
-      final granted = await RewardedAdService.showRewardedAd(
-        onAdPreparing: () {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Preparing your rewarded ad…'),
-                behavior: SnackBarBehavior.floating,
-              ),
-            );
-          }
-        },
-        onAdNotReady: () {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Ad is not ready yet. Please try again in a moment.'),
-                behavior: SnackBarBehavior.floating,
-              ),
-            );
-          }
-        },
-        onRewardGranted: (amount) {
-          debugPrint('CreditsScreen: backend confirmed +$amount credits');
-        },
-        onRewardFailed: (error) {
-          debugPrint('CreditsScreen: reward confirmation failed: $error');
-        },
-      );
 
-      if (!granted) return;
+    final granted = await RewardedAdService.showRewardedAd(
+      onAdPreparing: () {
+        if (mounted) setState(() => watchingAd = true);
+      },
+      onAdNotReady: () {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Rewarded ad is not ready yet. Please try again.'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      },
+      onRewardGranted: (amount) {
+        debugPrint('CreditsScreen: backend confirmed +$amount credits');
+      },
+      onRewardFailed: (error) {
+        debugPrint('CreditsScreen: reward failed: $error');
+      },
+    );
 
-      // Always re-read Firestore through the backend. Never increment locally.
-      await _loadCredits();
+    if (!mounted) return;
 
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('+$rewardAmount credits added'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    } catch (error) {
-      debugPrint('CreditsScreen: rewarded ad error: $error');
+    if (granted) {
+      // The backend has already committed the Firestore transaction.
+      // Fetch the authoritative balance immediately instead of guessing it.
+      await _loadCredits(showLoading: false);
+
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Could not confirm the reward. Please try again.'),
+          content: Text('Reward credited successfully!'),
           behavior: SnackBarBehavior.floating,
         ),
       );
-    } finally {
-      if (mounted) setState(() => watchingAd = false);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'No credits were added. Complete the rewarded ad and try again.',
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     }
+
+    setState(() => watchingAd = false);
   }
 
   @override
@@ -152,10 +123,9 @@ class _CreditsScreenState extends State<CreditsScreen> {
         actions: [
           IconButton(
             tooltip: 'Refresh credits',
-            onPressed: loadingCredits ? null : _loadCredits,
+            onPressed: loadingCredits ? null : () => _loadCredits(),
             icon: const Icon(Icons.refresh_rounded),
           ),
-          const SizedBox(width: 8),
         ],
       ),
       body: SafeArea(
@@ -166,18 +136,12 @@ class _CreditsScreenState extends State<CreditsScreen> {
               padding: const EdgeInsets.all(24),
               decoration: BoxDecoration(
                 gradient: const LinearGradient(
-                  colors: [
-                    Color(0xFF392B54),
-                    Color(0xFF21182E),
-                    _panel,
-                  ],
+                  colors: [Color(0xFF392B54), Color(0xFF21182E), _panel],
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
                 ),
                 borderRadius: BorderRadius.circular(28),
-                border: Border.all(
-                  color: _violet.withValues(alpha: .30),
-                ),
+                border: Border.all(color: _violet.withValues(alpha: .30)),
               ),
               child: Column(
                 children: [
@@ -205,7 +169,7 @@ class _CreditsScreenState extends State<CreditsScreen> {
                   ),
                   const SizedBox(height: 5),
                   Text(
-                    loadingCredits ? '...' : '$credits',
+                    loadingCredits ? '…' : '$credits',
                     style: const TextStyle(
                       fontSize: 48,
                       height: 1,
@@ -213,9 +177,11 @@ class _CreditsScreenState extends State<CreditsScreen> {
                     ),
                   ),
                   const SizedBox(height: 6),
-                  const Text(
-                    'credits available',
-                    style: TextStyle(color: _muted),
+                  Text(
+                    loadingCredits
+                        ? 'Checking your balance…'
+                        : '$plan plan · credits available',
+                    style: const TextStyle(color: _muted),
                   ),
                   const SizedBox(height: 20),
                   ClipRRect(
@@ -229,9 +195,7 @@ class _CreditsScreenState extends State<CreditsScreen> {
                 ],
               ),
             ),
-
             const SizedBox(height: 20),
-
             Container(
               padding: const EdgeInsets.all(18),
               decoration: BoxDecoration(
@@ -258,10 +222,7 @@ class _CreditsScreenState extends State<CreditsScreen> {
                   const SizedBox(height: 9),
                   const Text(
                     'Watch a short rewarded ad and get 5 AI credits.',
-                    style: TextStyle(
-                      color: _muted,
-                      height: 1.45,
-                    ),
+                    style: TextStyle(color: _muted, height: 1.45),
                   ),
                   const SizedBox(height: 17),
                   SizedBox(
@@ -273,21 +234,18 @@ class _CreditsScreenState extends State<CreditsScreen> {
                           ? const SizedBox(
                               width: 19,
                               height: 19,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                              ),
+                              child: CircularProgressIndicator(strokeWidth: 2),
                             )
                           : const Icon(Icons.ondemand_video_rounded),
                       label: Text(
                         watchingAd
                             ? 'Waiting for reward...'
-                            : 'Watch Ad  •  +5 Credits',
+                            : 'Watch Ad  •  +$firstRewardAmount Credits',
                       ),
                       style: FilledButton.styleFrom(
                         backgroundColor: _violet,
                         foregroundColor: const Color(0xFF1A1424),
-                        disabledBackgroundColor:
-                            _violet.withValues(alpha: .35),
+                        disabledBackgroundColor: _violet.withValues(alpha: .35),
                         disabledForegroundColor: Colors.white70,
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(16),
@@ -298,13 +256,9 @@ class _CreditsScreenState extends State<CreditsScreen> {
                 ],
               ),
             ),
-
             const SizedBox(height: 16),
-
             const _HowItWorksCard(),
-
             const SizedBox(height: 18),
-
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
@@ -315,11 +269,7 @@ class _CreditsScreenState extends State<CreditsScreen> {
               child: const Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(
-                    Icons.info_outline_rounded,
-                    color: _muted,
-                    size: 19,
-                  ),
+                  Icon(Icons.info_outline_rounded, color: _muted, size: 19),
                   SizedBox(width: 10),
                   Expanded(
                     child: Text(
@@ -358,10 +308,7 @@ class _HowItWorksCard extends StatelessWidget {
         children: [
           Text(
             'How credits work',
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w800,
-            ),
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
           ),
           SizedBox(height: 15),
           _CreditRow(
@@ -379,7 +326,7 @@ class _HowItWorksCard extends StatelessWidget {
           _CreditRow(
             icon: Icons.card_giftcard_rounded,
             title: 'New creator',
-            subtitle: '10 starting credits',
+            subtitle: '5 starting credits',
           ),
         ],
       ),
@@ -426,10 +373,7 @@ class _CreditRow extends StatelessWidget {
               const SizedBox(height: 3),
               Text(
                 subtitle,
-                style: const TextStyle(
-                  color: _muted,
-                  fontSize: 11,
-                ),
+                style: const TextStyle(color: _muted, fontSize: 11),
               ),
             ],
           ),
