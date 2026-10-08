@@ -779,7 +779,72 @@ jobs:
 
 
       # =========================================================
-      # 12. ARCHIVE
+      # 12. RE-SYNC COCOAPODS AFTER THE PROJECT WAS MODIFIED
+      #
+      # The 'Configure Runner target signing' step rewrites
+      # Runner.xcodeproj/project.pbxproj to apply
+      # signing. CocoaPods' sandbox check compares the project against
+      # Podfile.lock/Manifest.lock, so that rewrite invalidates it and the
+      # archive fails with:
+      #     diff: /Podfile.lock: No such file or directory
+      #     error: The sandbox is not in sync with the Podfile.lock.
+      #
+      # pod install is therefore re-run AFTER the last project change and
+      # immediately before the archive, and the lock files are verified
+      # explicitly so this fails here with a clear message rather than
+      # inside xcodebuild.
+      # =========================================================
+      - name: Re-sync CocoaPods after project changes
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "RE-SYNCING COCOAPODS"
+          echo "========================================"
+
+          cd ios
+
+          echo "Podfile present:      $(test -f Podfile && echo yes || echo NO)"
+          echo "Podfile.lock present: $(test -f Podfile.lock && echo yes || echo NO)"
+
+          pod install
+
+          # -----------------------------------------------------
+          # Verify the integration is internally consistent
+          # -----------------------------------------------------
+
+          if [ ! -f Podfile.lock ]; then
+            echo "ERROR: Podfile.lock was not produced by pod install."
+            exit 1
+          fi
+
+          if [ ! -f Pods/Manifest.lock ]; then
+            echo "ERROR: Pods/Manifest.lock is missing; the Pods sandbox was not installed."
+            exit 1
+          fi
+
+          echo ""
+          echo "Podfile.lock vs Pods/Manifest.lock:"
+
+          if diff -q Podfile.lock Pods/Manifest.lock >/dev/null 2>&1; then
+            echo "  in sync"
+          else
+            echo "ERROR: Podfile.lock and Pods/Manifest.lock differ."
+            diff -u Podfile.lock Pods/Manifest.lock || true
+            exit 1
+          fi
+
+          # The value the [CP] Check Pods Manifest.lock script relies on.
+          echo ""
+          echo "PODFILE_LOCK from the generated xcconfig:"
+          grep -h 'PODFILE_LOCK' Pods/Target\ Support\ Files/Pods-Runner/*.xcconfig 2>/dev/null || true
+
+          echo ""
+          echo "========================================"
+          echo "COCOAPODS RE-SYNCED"
+          echo "========================================"
+      # =========================================================
+      # 13. ARCHIVE
       #
       # Signing is NOT passed as xcodebuild command-line arguments.
       # Global command-line build settings (DEVELOPMENT_TEAM,
@@ -789,7 +854,7 @@ jobs:
       # and the rest, which produces:
       #   "does not support provisioning profiles, but provisioning
       #    profile ... has been manually specified"
-      # Step 10 scopes those settings to the Runner Release
+      # The 'Configure Runner target signing' step scopes those settings to the Runner Release
       # configuration only, and the Pods keep automatic signing.
       # =========================================================
       - name: Archive VYRO
@@ -849,7 +914,7 @@ jobs:
             archive
 
       # =========================================================
-      # 13. VERIFY ARCHIVE
+      # 14. VERIFY ARCHIVE
       # =========================================================
       - name: Verify archive
         run: |
@@ -867,7 +932,7 @@ jobs:
           ls -lah "$RUNNER_TEMP/VYRO.xcarchive"
 
       # =========================================================
-      # 14. EXPORT IPA
+      # 15. EXPORT IPA
       # =========================================================
       - name: Export IPA
         run: |
@@ -890,7 +955,7 @@ jobs:
           ls -lah "$RUNNER_TEMP/export"
 
       # =========================================================
-      # 15. VERIFY IPA
+      # 16. VERIFY IPA
       # =========================================================
       - name: Verify IPA
         run: |
@@ -915,7 +980,7 @@ jobs:
           cp "$IPA" "$RUNNER_TEMP/VYRO.ipa"
 
       # =========================================================
-      # 16. UPLOAD IPA ARTIFACT
+      # 17. UPLOAD IPA ARTIFACT
       # =========================================================
       - name: Upload IPA
         uses: actions/upload-artifact@v4
@@ -925,7 +990,7 @@ jobs:
           if-no-files-found: error
 
       # =========================================================
-      # 17. UPLOAD ARCHIVE
+      # 18. UPLOAD ARCHIVE
       # =========================================================
       - name: Upload XCArchive
         uses: actions/upload-artifact@v4
@@ -935,7 +1000,7 @@ jobs:
           if-no-files-found: error
 
       # =========================================================
-      # 18. UPLOAD TO APP STORE CONNECT / TESTFLIGHT
+      # 19. UPLOAD TO APP STORE CONNECT / TESTFLIGHT
       #
       # Authenticates with an App Store Connect API key. The three
       # secrets below are read from the environment, never printed
@@ -1048,7 +1113,7 @@ jobs:
           echo "========================================"
 
       # =========================================================
-      # 19. CLEAN UP SIGNING MATERIAL
+      # 20. CLEAN UP SIGNING MATERIAL
       # =========================================================
       - name: Clean up signing keychain and credentials
         if: always()
