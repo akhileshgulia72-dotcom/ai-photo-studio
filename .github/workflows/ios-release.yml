@@ -7,8 +7,10 @@ on:
   push:
     branches: [main, master]
     tags: ['v*']
+
   pull_request:
     branches: [main, master]
+
   workflow_dispatch:
     inputs:
       upload_to_testflight:
@@ -21,7 +23,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Production backend. Overridable with a repository variable.
+  # Production backend.
   # Never commit a test Cloud Run revision URL as the shipped default.
   GENERATION_API_BASE_URL: ${{ vars.GENERATION_API_BASE_URL || 'https://vyro-api-jnz6yqjl4a-el.a.run.app' }}
 
@@ -44,11 +46,17 @@ jobs:
 
     steps:
 
-      # ------------------------------------------------------------ checkout
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ------------------------------------------------------------ setup
+      # ============================================================
+      # XCODE
+      # ============================================================
+
       - name: Select the newest available Xcode
         run: |
           set -euo pipefail
@@ -65,6 +73,10 @@ jobs:
           xcodebuild -version
           xcode-select -p
 
+      # ============================================================
+      # FLUTTER
+      # ============================================================
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -73,24 +85,33 @@ jobs:
           cache: true
 
       - name: Flutter environment info
-        run: flutter --version
+        run: |
+          flutter --version
 
       - name: Install Flutter dependencies
-        run: flutter pub get
+        run: |
+          flutter pub get
+
+      # ============================================================
+      # FIREBASE
+      # ============================================================
 
       - name: Verify the FlutterFire configuration is committed
         run: |
           set -euo pipefail
 
-          test -f lib/firebase_options.dart \
-            || {
-              echo "::error::lib/firebase_options.dart is missing. VYRO initialises Firebase from this file."
-              exit 1
-            }
+          test -f lib/firebase_options.dart || {
+            echo "::error::lib/firebase_options.dart is missing."
+            echo "VYRO initialises Firebase from this file."
+            exit 1
+          }
 
           echo "lib/firebase_options.dart present."
 
-      # ------------------------------------------------------- detect secrets
+      # ============================================================
+      # DETECT SIGNING SECRETS
+      # ============================================================
+
       - name: Preflight - detect configured credentials
         id: preflight
         env:
@@ -98,6 +119,7 @@ jobs:
           CERT_PW: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
           PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
           KEYCHAIN_PW: ${{ secrets.KEYCHAIN_PASSWORD }}
+
           ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           ASC_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           ASC_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
@@ -116,7 +138,8 @@ jobs:
 
           elif [ -n "${CERT:-}" ] || [ -n "${PROFILE:-}" ]; then
 
-            echo "::error::Partial signing configuration. IOS_CERTIFICATE_BASE64, IOS_CERTIFICATE_PASSWORD, IOS_PROVISIONING_PROFILE_BASE64 and KEYCHAIN_PASSWORD must all be set together."
+            echo "::error::Partial signing configuration."
+            echo "::error::IOS_CERTIFICATE_BASE64, IOS_CERTIFICATE_PASSWORD, IOS_PROVISIONING_PROFILE_BASE64 and KEYCHAIN_PASSWORD must all be set together."
             exit 1
 
           fi
@@ -139,10 +162,14 @@ jobs:
           echo "TestFlight upload possible: $can_upload"
 
           if [ "$signing" = "0" ]; then
-            echo "::warning::No signing secrets configured. This run builds unsigned and skips the archive and TestFlight upload."
+            echo "::warning::No signing secrets configured."
+            echo "::warning::This run will build unsigned."
           fi
 
-      # ------------------------------------------------------- iOS config files
+      # ============================================================
+      # ADMOB
+      # ============================================================
+
       - name: Verify the iOS AdMob application id
         run: |
           set -euo pipefail
@@ -173,6 +200,10 @@ jobs:
 
           echo "AdMob application id check passed."
 
+      # ============================================================
+      # GOOGLE SERVICE INFO
+      # ============================================================
+
       - name: Install GoogleService-Info.plist
         env:
           GSP_B64: ${{ secrets.GOOGLE_SERVICE_INFO_PLIST_BASE64 }}
@@ -181,7 +212,9 @@ jobs:
           set -euo pipefail
 
           if [ -z "${GSP_B64:-}" ]; then
-            echo "::notice::GOOGLE_SERVICE_INFO_PLIST_BASE64 is not set. VYRO initialises Firebase from lib/firebase_options.dart, so the app still starts; iOS Google Sign-In may require this file."
+            echo "::notice::GOOGLE_SERVICE_INFO_PLIST_BASE64 is not set."
+            echo "::notice::VYRO initialises Firebase from lib/firebase_options.dart."
+            echo "::notice::iOS Google Sign-In may require this file."
             exit 0
           fi
 
@@ -195,7 +228,9 @@ jobs:
             -c 'Print :PROJECT_ID' \
             ios/Runner/GoogleService-Info.plist)"
 
-      # ------------------------------------------------------------ validation
+      # ============================================================
+      # PROJECT VALIDATION
+      # ============================================================
 
       - name: Validate Flutter project
         run: |
@@ -203,10 +238,13 @@ jobs:
 
           test -f ios/Runner.xcodeproj/project.pbxproj
           test -f ios/ExportOptions.plist
+          test -f ios/Podfile
 
           echo "iOS project files verified."
 
-      # ------------------------------------------------------------ code sign
+      # ============================================================
+      # IMPORT APPLE CERTIFICATE + PROVISIONING PROFILE
+      # ============================================================
 
       - name: Import signing certificate and provisioning profile
         if: steps.preflight.outputs.signing == '1'
@@ -227,6 +265,8 @@ jobs:
           echo "$CERT_B64" | base64 --decode > "$CERT_PATH"
           echo "$PROFILE_B64" | base64 --decode > "$PROFILE_PATH"
 
+          echo "Creating temporary signing keychain..."
+
           security create-keychain \
             -p "$KEYCHAIN_PW" \
             "$KEYCHAIN_PATH"
@@ -238,6 +278,8 @@ jobs:
           security unlock-keychain \
             -p "$KEYCHAIN_PW" \
             "$KEYCHAIN_PATH"
+
+          echo "Importing Apple Distribution certificate..."
 
           security import "$CERT_PATH" \
             -P "$CERT_PW" \
@@ -252,16 +294,16 @@ jobs:
             -k "$KEYCHAIN_PW" \
             "$KEYCHAIN_PATH" >/dev/null
 
+          echo "Installing provisioning profile..."
+
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
 
           cp "$PROFILE_PATH" \
             ~/Library/MobileDevice/Provisioning\ Profiles/
 
-          # ---------------------------------------------------------
-          # IMPORTANT:
-          # Read the actual UUID and name from the provisioning profile.
-          # This prevents Xcode from falling back to Development signing.
-          # ---------------------------------------------------------
+          # ============================================================
+          # READ PROVISIONING PROFILE
+          # ============================================================
 
           security cms \
             -D \
@@ -286,10 +328,20 @@ jobs:
               "$PROFILE_PLIST"
           )
 
-          echo "Provisioning profile:"
-          echo "  Name: $PROFILE_NAME"
-          echo "  UUID: $PROFILE_UUID"
-          echo "  App ID: $PROFILE_APP_ID"
+          PROFILE_TEAM_ID=$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :TeamIdentifier:0' \
+              "$PROFILE_PLIST" 2>/dev/null || true
+          )
+
+          echo "========================================"
+          echo "Provisioning Profile"
+          echo "========================================"
+          echo "Name:       $PROFILE_NAME"
+          echo "UUID:       $PROFILE_UUID"
+          echo "App ID:     $PROFILE_APP_ID"
+          echo "Team ID:    $PROFILE_TEAM_ID"
+          echo "========================================"
 
           if [ -z "$PROFILE_UUID" ]; then
             echo "::error::Could not extract provisioning profile UUID."
@@ -307,6 +359,7 @@ jobs:
             exit 1
           fi
 
+          # Store both UUID and profile NAME for later steps.
           echo "IOS_PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
           echo "IOS_PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
 
@@ -318,91 +371,57 @@ jobs:
 
           echo "Installed distribution certificate and provisioning profile."
           echo "Distribution profile UUID: $PROFILE_UUID"
+          echo "Distribution profile name: $PROFILE_NAME"
 
-      # ------------------------------------------------------------ CocoaPods
+      # ============================================================
+      # COCOAPODS
+      # ============================================================
 
       - name: Install CocoaPods dependencies
         run: |
           set -euo pipefail
-
-          test -f ios/Podfile \
-            || {
-              echo "::error::ios/Podfile is missing."
-              exit 1
-            }
 
           cd ios
 
           pod repo update
           pod install
 
-      # ------------------------------------------------------ FORCE SIGNING
+          echo "CocoaPods installation completed."
+
+      # ============================================================
+      # PREPARE XCODE SIGNING
+      # ============================================================
 
       - name: Configure manual App Store distribution signing
         if: steps.preflight.outputs.signing == '1'
         run: |
           set -euo pipefail
 
-          if [ -z "${IOS_PROFILE_UUID:-}" ]; then
-            echo "::error::IOS_PROFILE_UUID was not created."
-            exit 1
-          fi
-
-          echo "Configuring Release signing..."
-
           PBX="ios/Runner.xcodeproj/project.pbxproj"
 
           test -f "$PBX"
 
-          # Remove any old automatic/manual signing values that may conflict.
-          sed -i '' '/CODE_SIGN_STYLE = Automatic;/d' "$PBX"
-          sed -i '' '/CODE_SIGN_IDENTITY = "Apple Distribution";/d' "$PBX"
-          sed -i '' '/CODE_SIGN_IDENTITY\[sdk=iphoneos\*\] = "Apple Distribution";/d' "$PBX"
+          echo "Preparing Xcode signing configuration..."
 
-          # Ensure Release uses Manual signing.
-          python3 - <<'PY'
-          from pathlib import Path
+          # Remove stale Apple Distribution identity entries that could
+          # conflict with the command-line signing configuration.
+          sed -i '' \
+            '/CODE_SIGN_IDENTITY = "Apple Distribution";/d' \
+            "$PBX"
 
-          path = Path("ios/Runner.xcodeproj/project.pbxproj")
-          text = path.read_text()
+          sed -i '' \
+            '/CODE_SIGN_IDENTITY\[sdk=iphoneos\*\] = "Apple Distribution";/d' \
+            "$PBX"
 
-          # Runner target Release configuration.
-          marker = "97C147071C2B0E2C0075B9A6 /* Release */ = {"
-          start = text.find(marker)
+          echo "Project signing configuration cleaned."
 
-          if start == -1:
-              raise SystemExit("Could not find Runner Release build configuration.")
-
-          end = text.find("\n\t\t\t};", start)
-
-          if end == -1:
-              raise SystemExit("Could not determine Runner Release build configuration block.")
-
-          block = text[start:end]
-
-          additions = """
-\t\t\t\tCODE_SIGN_STYLE = Manual;
-\t\t\t\tCODE_SIGN_IDENTITY = "Apple Distribution";
-\t\t\t\tDEVELOPMENT_TEAM = PR4R9GAHZ3;
-\t\t\t\tPROVISIONING_PROFILE = "$(IOS_PROFILE_UUID)";
-"""
-
-          if "CODE_SIGN_STYLE = Manual;" not in block:
-              block += additions
-
-          text = text[:start] + block + text[end:]
-
-          path.write_text(text)
-
-          print("Release signing configuration updated.")
-          PY
-
-          echo "Signing settings:"
           grep -n \
             -E 'CODE_SIGN_STYLE|CODE_SIGN_IDENTITY|DEVELOPMENT_TEAM|PROVISIONING_PROFILE' \
             "$PBX" || true
 
-      # ---------------------------------------------------------------- build
+      # ============================================================
+      # BUILD UNSIGNED
+      # ============================================================
 
       - name: Build iOS release (unsigned)
         if: steps.preflight.outputs.signing != '1'
@@ -416,25 +435,121 @@ jobs:
             --build-number="${FLUTTER_BUILD_NUMBER}" \
             --dart-define=GENERATION_API_BASE_URL="${GENERATION_API_BASE_URL}"
 
+      # ============================================================
+      # BUILD SIGNED ARCHIVE + IPA
+      # ============================================================
+
       - name: Build iOS archive and IPA
         if: steps.preflight.outputs.signing == '1'
         run: |
           set -euo pipefail
 
-          echo "Building signed distribution IPA."
-          echo "Bundle ID: ${BUNDLE_ID}"
-          echo "Team: PR4R9GAHZ3"
-          echo "Profile UUID: ${IOS_PROFILE_UUID}"
-          echo "Profile Name: ${IOS_PROFILE_NAME}"
+          echo "========================================"
+          echo "BUILDING VYRO SIGNED DISTRIBUTION"
+          echo "========================================"
 
-          flutter build ipa \
+          echo "Bundle ID:      ${BUNDLE_ID}"
+          echo "Team:           PR4R9GAHZ3"
+          echo "Profile UUID:   ${IOS_PROFILE_UUID}"
+          echo "Profile Name:   ${IOS_PROFILE_NAME}"
+
+          test -n "${IOS_PROFILE_UUID}"
+          test -n "${IOS_PROFILE_NAME}"
+
+          # ==========================================================
+          # STEP 1
+          # Generate Flutter iOS build files without signing.
+          # ==========================================================
+
+          echo ""
+          echo "STEP 1/3: Preparing Flutter iOS build..."
+
+          flutter build ios \
             --release \
             --build-name="${FLUTTER_BUILD_NAME}" \
             --build-number="${FLUTTER_BUILD_NUMBER}" \
             --dart-define=GENERATION_API_BASE_URL="${GENERATION_API_BASE_URL}" \
-            --export-options-plist=ios/ExportOptions.plist
+            --no-codesign
 
-      # ------------------------------------------------------ backend protection
+          echo "Flutter iOS build preparation complete."
+
+          # ==========================================================
+          # STEP 2
+          # Archive with EXPLICIT distribution signing.
+          #
+          # This is the critical fix.
+          #
+          # Xcode is explicitly told:
+          #   Manual signing
+          #   Apple Distribution
+          #   Team PR4R9GAHZ3
+          #   Exact distribution provisioning profile
+          #
+          # Therefore Xcode does NOT search for an iOS Development
+          # profile and does NOT require an Apple account login.
+          # ==========================================================
+
+          echo ""
+          echo "STEP 2/3: Creating signed Xcode archive..."
+
+          xcodebuild archive \
+            -workspace "${WORKSPACE}" \
+            -scheme "${SCHEME}" \
+            -configuration Release \
+            -archivePath "$RUNNER_TEMP/VYRO.xcarchive" \
+            DEVELOPMENT_TEAM="PR4R9GAHZ3" \
+            CODE_SIGN_STYLE="Manual" \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="${IOS_PROFILE_NAME}" \
+            PRODUCT_BUNDLE_IDENTIFIER="${BUNDLE_ID}"
+
+          echo ""
+          echo "Xcode archive completed."
+
+          test -d "$RUNNER_TEMP/VYRO.xcarchive"
+
+          # ==========================================================
+          # STEP 3
+          # Export IPA.
+          # ==========================================================
+
+          echo ""
+          echo "STEP 3/3: Exporting IPA..."
+
+          rm -rf "$RUNNER_TEMP/VYRO-export"
+
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/VYRO.xcarchive" \
+            -exportPath "$RUNNER_TEMP/VYRO-export" \
+            -exportOptionsPlist "ios/ExportOptions.plist"
+
+          mkdir -p build/ios/ipa
+
+          IPA_FILE=$(find "$RUNNER_TEMP/VYRO-export" \
+            -maxdepth 1 \
+            -name "*.ipa" \
+            -print \
+            -quit)
+
+          if [ -z "$IPA_FILE" ]; then
+            echo "::error::No IPA was produced."
+            echo "Export directory contents:"
+            find "$RUNNER_TEMP/VYRO-export" -maxdepth 2 -print || true
+            exit 1
+          fi
+
+          cp "$IPA_FILE" build/ios/ipa/
+
+          echo ""
+          echo "========================================"
+          echo "IPA CREATED SUCCESSFULLY"
+          echo "========================================"
+
+          ls -lh build/ios/ipa/
+
+      # ============================================================
+      # VERIFY BACKEND
+      # ============================================================
 
       - name: Confirm the production backend is baked in
         run: |
@@ -461,7 +576,9 @@ jobs:
 
           echo "Backend URL check passed."
 
-      # ------------------------------------------------------------- artefacts
+      # ============================================================
+      # UPLOAD UNSIGNED APP
+      # ============================================================
 
       - name: Upload the unsigned .app
         if: steps.preflight.outputs.signing != '1'
@@ -471,6 +588,10 @@ jobs:
           path: build/ios/iphoneos/Runner.app
           if-no-files-found: error
 
+      # ============================================================
+      # UPLOAD IPA ARTIFACT
+      # ============================================================
+
       - name: Upload the IPA
         if: steps.preflight.outputs.signing == '1'
         uses: actions/upload-artifact@v4
@@ -479,7 +600,9 @@ jobs:
           path: build/ios/ipa/*.ipa
           if-no-files-found: error
 
-      # ------------------------------------------------------------- TestFlight
+      # ============================================================
+      # TESTFLIGHT
+      # ============================================================
 
       - name: Upload to TestFlight
         if: |
@@ -504,7 +627,16 @@ jobs:
           chmod 600 \
             "$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"
 
-          IPA=$(ls build/ios/ipa/*.ipa | head -1)
+          IPA=$(find build/ios/ipa \
+            -maxdepth 1 \
+            -name "*.ipa" \
+            -print \
+            -quit)
+
+          if [ -z "$IPA" ]; then
+            echo "::error::IPA not found."
+            exit 1
+          fi
 
           echo "Uploading $IPA"
 
@@ -516,9 +648,12 @@ jobs:
             --private-keys-dir "$KEY_DIR" \
             --verbose
 
-          echo "Uploaded to App Store Connect. Processing usually takes 5-15 minutes."
+          echo "Uploaded to App Store Connect."
+          echo "Processing usually takes 5-15 minutes."
 
-      # ------------------------------------------------------------- cleanup
+      # ============================================================
+      # CLEANUP
+      # ============================================================
 
       - name: Clean up the temporary keychain
         if: always() && steps.preflight.outputs.signing == '1'
