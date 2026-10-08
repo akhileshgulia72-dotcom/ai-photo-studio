@@ -13,15 +13,17 @@ jobs:
       GENERATION_API_BASE_URL: https://vyro-api-jnz6yqjl4a-el.a.run.app
 
     steps:
-      # ---------------------------------------------------------
+
+      # =========================================================
       # 1. Checkout
-      # ---------------------------------------------------------
+      # =========================================================
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------------------------------------------------------
+
+      # =========================================================
       # 2. Flutter
-      # ---------------------------------------------------------
+      # =========================================================
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -29,15 +31,18 @@ jobs:
           channel: stable
           cache: true
 
-      # ---------------------------------------------------------
-      # 3. Flutter dependencies
-      # ---------------------------------------------------------
-      - name: Flutter Pub Get
-        run: flutter pub get
 
-      # ---------------------------------------------------------
-      # 4. Import Apple Distribution Certificate
-      # ---------------------------------------------------------
+      # =========================================================
+      # 3. Flutter dependencies
+      # =========================================================
+      - name: Flutter Pub Get
+        run: |
+          flutter pub get
+
+
+      # =========================================================
+      # 4. Install Apple Distribution Certificate
+      # =========================================================
       - name: Install Apple Distribution Certificate
         env:
           IOS_CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
@@ -46,7 +51,7 @@ jobs:
           set -e
 
           CERTIFICATE_PATH="$RUNNER_TEMP/apple_distribution.p12"
-          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PATH="$RUNNER_TEMP/vyro-build.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
 
           echo "$IOS_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
@@ -81,18 +86,19 @@ jobs:
             -p "$KEYCHAIN_PASSWORD" \
             "$KEYCHAIN_PATH"
 
-          echo "Certificate installed successfully."
+          echo "Apple Distribution certificate installed."
 
-      # ---------------------------------------------------------
+
+      # =========================================================
       # 5. Install provisioning profile
-      # ---------------------------------------------------------
+      # =========================================================
       - name: Install Provisioning Profile
         env:
           IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
         run: |
           set -e
 
-          PROFILE_PATH="$RUNNER_TEMP/profile.mobileprovision"
+          PROFILE_PATH="$RUNNER_TEMP/vyro.mobileprovision"
 
           echo "$IOS_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
 
@@ -115,9 +121,21 @@ jobs:
               "$RUNNER_TEMP/profile.plist"
           )
 
-          APPLICATION_IDENTIFIER=$(
+          PROFILE_APP_ID=$(
             /usr/libexec/PlistBuddy \
               -c "Print :Entitlements:application-identifier" \
+              "$RUNNER_TEMP/profile.plist"
+          )
+
+          PROFILE_TEAM_ID=$(
+            /usr/libexec/PlistBuddy \
+              -c "Print :TeamIdentifier:0" \
+              "$RUNNER_TEMP/profile.plist"
+          )
+
+          PROFILE_EXPIRATION=$(
+            /usr/libexec/PlistBuddy \
+              -c "Print :ExpirationDate" \
               "$RUNNER_TEMP/profile.plist"
           )
 
@@ -127,169 +145,104 @@ jobs:
           echo "IOS_PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
           echo "IOS_PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
 
-          echo "Provisioning Profile:"
-          echo "UUID: $PROFILE_UUID"
-          echo "Name: $PROFILE_NAME"
-          echo "Application Identifier: $APPLICATION_IDENTIFIER"
+          echo ""
+          echo "========================================="
+          echo "Provisioning Profile"
+          echo "========================================="
+          echo "Name:       $PROFILE_NAME"
+          echo "UUID:       $PROFILE_UUID"
+          echo "App ID:     $PROFILE_APP_ID"
+          echo "Team ID:    $PROFILE_TEAM_ID"
+          echo "Expires:    $PROFILE_EXPIRATION"
+          echo "========================================="
 
-      # ---------------------------------------------------------
+
+      # =========================================================
       # 6. Verify certificate
-      # ---------------------------------------------------------
-      - name: Verify Apple Signing Certificate
+      # =========================================================
+      - name: Verify Signing Identity
         run: |
           set -e
+
+          echo "Available code signing identities:"
 
           security find-identity \
             -v \
             -p codesigning
 
-      # ---------------------------------------------------------
-      # 7. Configure ONLY Runner Release signing
-      #
-      # IMPORTANT:
-      # We do NOT pass signing parameters globally to xcodebuild.
-      # This prevents Firebase / Pods / GoogleSignIn / etc.
-      # from receiving the Runner provisioning profile.
-      # ---------------------------------------------------------
-      - name: Configure Runner Release Signing
-        env:
-          IOS_PROFILE_NAME: ${{ env.IOS_PROFILE_NAME }}
+          echo ""
+          echo "Installed provisioning profiles:"
+
+          ls -la \
+            "$HOME/Library/MobileDevice/Provisioning Profiles/"
+
+
+      # =========================================================
+      # 7. Verify provisioning profile matches app
+      # =========================================================
+      - name: Verify Provisioning Profile
         run: |
           set -e
 
-          python3 <<'PY'
-          from pathlib import Path
-          import os
-          import re
+          echo "Checking provisioning profile..."
 
-          path = Path("ios/Runner.xcodeproj/project.pbxproj")
-          text = path.read_text()
-
-          marker = "97C147071C2E0E2C0075B9A6 /* Release */ = {"
-
-          start = text.find(marker)
-
-          if start == -1:
-              raise SystemExit(
-                  "ERROR: Runner Release build configuration was not found."
-              )
-
-          end = text.find("\n\t\t};", start)
-
-          if end == -1:
-              raise SystemExit(
-                  "ERROR: Could not determine Runner Release configuration block."
-              )
-
-          end += len("\n\t\t};")
-
-          block = text[start:end]
-
-          # Remove any existing signing settings from ONLY this block.
-          block = re.sub(
-              r'^\s*CODE_SIGN_STYLE\s*=\s*[^;]+;\s*$',
-              '',
-              block,
-              flags=re.MULTILINE
-          )
-
-          block = re.sub(
-              r'^\s*CODE_SIGN_IDENTITY\s*=\s*[^;]+;\s*$',
-              '',
-              block,
-              flags=re.MULTILINE
-          )
-
-          block = re.sub(
-              r'^\s*DEVELOPMENT_TEAM\s*=\s*[^;]+;\s*$',
-              '',
-              block,
-              flags=re.MULTILINE
-          )
-
-          block = re.sub(
-              r'^\s*PROVISIONING_PROFILE_SPECIFIER\s*=\s*[^;]+;\s*$',
-              '',
-              block,
-              flags=re.MULTILINE
-          )
-
-          block = re.sub(
-              r'^\s*PROVISIONING_PROFILE\s*=\s*[^;]+;\s*$',
-              '',
-              block,
-              flags=re.MULTILINE
-          )
-
-          # Add signing settings ONLY to Runner Release.
-          signing = f"""
-                  CODE_SIGN_STYLE = Manual;
-                  CODE_SIGN_IDENTITY = "Apple Distribution";
-                  DEVELOPMENT_TEAM = PR4R9GAHZ3;
-                  PROVISIONING_PROFILE_SPECIFIER = "$(IOS_PROFILE_NAME)";
-          """
-
-          insert_at = block.rfind("\n\t\t};")
-
-          if insert_at == -1:
-              raise SystemExit(
-                  "ERROR: Could not insert Runner Release signing settings."
-              )
-
-          block = block[:insert_at] + signing + block[insert_at:]
-
-          text = text[:start] + block + text[end:]
-
-          path.write_text(text)
-
-          print("Runner Release signing configured.")
-          PY
-
-          echo "Checking Runner Release configuration..."
-
-          sed -n \
-            '/97C147071C2B0E2C0075B9A6 \/\* Release \*\/ = {/,/};/p' \
-            ios/Runner.xcodeproj/project.pbxproj
-
-      # ---------------------------------------------------------
-      # 8. Make sure there are NO global provisioning settings
-      # ---------------------------------------------------------
-      - name: Check Signing Configuration
-        run: |
-          set -e
-
-          echo "Checking for provisioning settings..."
-
-          grep -n \
-            "PROVISIONING_PROFILE_SPECIFIER\|PROVISIONING_PROFILE =" \
-            ios/Runner.xcodeproj/project.pbxproj || true
+          /usr/libexec/PlistBuddy \
+            -c "Print :Entitlements:application-identifier" \
+            "$RUNNER_TEMP/profile.plist"
 
           echo ""
-          echo "Checking for Apple Distribution..."
 
-          grep -n \
-            "Apple Distribution" \
-            ios/Runner.xcodeproj/project.pbxproj || true
+          /usr/libexec/PlistBuddy \
+            -c "Print :Entitlements:com.apple.developer.team-identifier" \
+            "$RUNNER_TEMP/profile.plist"
 
-      # ---------------------------------------------------------
-      # 9. Clean Flutter
-      # ---------------------------------------------------------
+          echo ""
+
+          echo "Expected:"
+          echo "Team: $DEVELOPMENT_TEAM"
+          echo "Bundle: $BUNDLE_ID"
+
+
+      # =========================================================
+      # 8. Clean previous Flutter/iOS build
+      # =========================================================
       - name: Flutter Clean
         run: |
           flutter clean
+          rm -rf ios/Pods
+          rm -rf ios/Podfile.lock
+          rm -rf ios/.symlinks
+          rm -rf ios/Flutter/ephemeral
+
           flutter pub get
 
-      # ---------------------------------------------------------
-      # 10. Build IPA
+
+      # =========================================================
+      # 9. Install CocoaPods
+      # =========================================================
+      - name: Install CocoaPods Dependencies
+        working-directory: ios
+        run: |
+          pod repo update
+          pod install
+
+
+      # =========================================================
+      # 10. Build Flutter IPA
       #
       # IMPORTANT:
-      # No DEVELOPMENT_TEAM
-      # No CODE_SIGN_IDENTITY
-      # No PROVISIONING_PROFILE_SPECIFIER
       #
-      # Signing is already configured ONLY for Runner.
-      # ---------------------------------------------------------
-      - name: Build iOS IPA
+      # NO:
+      # DEVELOPMENT_TEAM=...
+      # CODE_SIGN_IDENTITY=...
+      # CODE_SIGN_STYLE=...
+      # PROVISIONING_PROFILE=...
+      # PROVISIONING_PROFILE_SPECIFIER=...
+      #
+      # This prevents the signing profile from being propagated
+      # into Firebase / Pods / Swift Package dependencies.
+      # =========================================================
+      - name: Build IPA
         env:
           GENERATION_API_BASE_URL: ${{ env.GENERATION_API_BASE_URL }}
         run: |
@@ -299,9 +252,39 @@ jobs:
             --release \
             --export-options-plist=ios/ExportOptions.plist
 
-      # ---------------------------------------------------------
-      # 11. Upload IPA
-      # ---------------------------------------------------------
+
+      # =========================================================
+      # 11. Show generated IPA
+      # =========================================================
+      - name: Verify IPA
+        run: |
+          set -e
+
+          echo "Generated IPA files:"
+
+          find build/ios/ipa \
+            -maxdepth 1 \
+            -type f \
+            -name "*.ipa" \
+            -print
+
+          IPA_COUNT=$(find build/ios/ipa \
+            -maxdepth 1 \
+            -type f \
+            -name "*.ipa" | wc -l | tr -d ' ')
+
+          if [ "$IPA_COUNT" -eq 0 ]; then
+            echo "ERROR: No IPA was generated."
+            exit 1
+          fi
+
+          echo ""
+          echo "IPA generated successfully."
+
+
+      # =========================================================
+      # 12. Upload IPA
+      # =========================================================
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -309,9 +292,10 @@ jobs:
           path: build/ios/ipa/*.ipa
           if-no-files-found: error
 
-      # ---------------------------------------------------------
-      # 12. Upload archive
-      # ---------------------------------------------------------
+
+      # =========================================================
+      # 13. Upload archive
+      # =========================================================
       - name: Upload XCArchive
         uses: actions/upload-artifact@v4
         with:
