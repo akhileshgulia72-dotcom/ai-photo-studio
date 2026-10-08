@@ -22,7 +22,7 @@ jobs:
 
 
       # =========================================================
-      # 2. FLUTTER
+      # 2. SETUP FLUTTER
       # =========================================================
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -37,7 +37,7 @@ jobs:
       # =========================================================
       - name: Flutter Pub Get
         run: |
-          set -e
+          set -euo pipefail
           flutter pub get
 
 
@@ -49,7 +49,7 @@ jobs:
           IOS_CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
           IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
         run: |
-          set -e
+          set -euo pipefail
 
           CERTIFICATE_PATH="$RUNNER_TEMP/apple_distribution.p12"
           KEYCHAIN_PATH="$RUNNER_TEMP/vyro-build.keychain-db"
@@ -87,7 +87,6 @@ jobs:
             -p "$KEYCHAIN_PASSWORD" \
             "$KEYCHAIN_PATH"
 
-          echo ""
           echo "Apple Distribution certificate installed."
 
 
@@ -98,7 +97,7 @@ jobs:
         env:
           IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
         run: |
-          set -e
+          set -euo pipefail
 
           PROFILE_PATH="$RUNNER_TEMP/vyro.mobileprovision"
 
@@ -157,47 +156,45 @@ jobs:
           echo "========================================="
 
           if [ "$PROFILE_TEAM" != "$DEVELOPMENT_TEAM" ]; then
-            echo ""
-            echo "ERROR: Provisioning profile belongs to wrong team."
+            echo "ERROR: Wrong Apple Developer Team."
             echo "Expected: $DEVELOPMENT_TEAM"
             echo "Actual:   $PROFILE_TEAM"
             exit 1
           fi
 
           if [ "$PROFILE_BUNDLE_ID" != "$BUNDLE_ID" ]; then
-            echo ""
-            echo "ERROR: Provisioning profile does not match bundle ID."
+            echo "ERROR: Wrong Bundle ID in provisioning profile."
             echo "Expected: $BUNDLE_ID"
             echo "Actual:   $PROFILE_BUNDLE_ID"
             exit 1
           fi
 
-          echo ""
-          echo "Profile verification PASSED."
+          echo "Provisioning profile verification PASSED."
 
 
       # =========================================================
-      # 6. VERIFY CERTIFICATE
+      # 6. VERIFY APPLE DISTRIBUTION CERTIFICATE
       # =========================================================
       - name: Verify Apple Distribution Certificate
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "Available code signing identities:"
+          echo "Available signing identities:"
 
           security find-identity \
             -v \
             -p codesigning
 
           echo ""
-          echo "Looking for Apple Distribution certificate..."
 
-          security find-identity \
+          if ! security find-identity \
             -v \
-            -p codesigning | grep "Apple Distribution"
+            -p codesigning | grep -q "Apple Distribution"; then
+            echo "ERROR: Apple Distribution certificate not found."
+            exit 1
+          fi
 
-          echo ""
-          echo "Certificate verification PASSED."
+          echo "Apple Distribution certificate verification PASSED."
 
 
       # =========================================================
@@ -205,7 +202,7 @@ jobs:
       # =========================================================
       - name: Flutter Clean
         run: |
-          set -e
+          set -euo pipefail
 
           flutter clean
 
@@ -218,183 +215,73 @@ jobs:
 
 
       # =========================================================
-      # 8. POD INSTALL
+      # 8. COCOAPODS
       # =========================================================
       - name: Install CocoaPods
         working-directory: ios
         run: |
-          set -e
-
+          set -euo pipefail
           pod install
 
 
       # =========================================================
-      # 9. FIND RUNNER RELEASE CONFIGURATION DYNAMICALLY
+      # 9. CONFIGURE RUNNER RELEASE SIGNING
       #
-      # DO NOT USE A HARD-CODED XCODE CONFIGURATION UUID.
+      # IMPORTANT:
+      # These are the ACTUAL IDs from this project:
+      #
+      # Runner target:
+      # 97C146ED1CF9000F007C117D
+      #
+      # Runner configuration list:
+      # 97C147051CF9000F007C117D
+      #
+      # Runner Release:
+      # 97C147071CF9000F007C117D
+      #
+      # Signing is applied ONLY to Runner Release.
       # =========================================================
       - name: Configure Runner Distribution Signing
         env:
           IOS_PROFILE_UUID: ${{ env.IOS_PROFILE_UUID }}
         run: |
-          set -e
+          set -euo pipefail
 
           python3 <<'PY'
           from pathlib import Path
           import re
+          import os
 
           path = Path("ios/Runner.xcodeproj/project.pbxproj")
           text = path.read_text()
 
+          RUNNER_RELEASE_ID = "97C147071CF9000F007C117D"
+
           print("Reading Xcode project...")
+          print("Runner Release ID:", RUNNER_RELEASE_ID)
 
-          # -----------------------------------------------------
-          # Find Runner PBXNativeTarget.
-          # -----------------------------------------------------
-          runner_match = re.search(
-              r'([A-F0-9]{24}) /\* Runner \*/ = \{',
-              text
-          )
+          marker = f"{RUNNER_RELEASE_ID} /* Release */ = {{"
 
-          if not runner_match:
-              raise SystemExit(
-                  "ERROR: Runner target was not found."
-              )
+          start = text.find(marker)
 
-          runner_target_id = runner_match.group(1)
-
-          print(
-              f"Runner target ID: {runner_target_id}"
-          )
-
-          # -----------------------------------------------------
-          # Find the Runner target block.
-          # -----------------------------------------------------
-          target_start = runner_match.start()
-
-          brace_start = text.find("{", runner_match.start())
-
-          depth = 0
-          target_end = None
-
-          for i in range(brace_start, len(text)):
-              if text[i] == "{":
-                  depth += 1
-              elif text[i] == "}":
-                  depth -= 1
-
-                  if depth == 0:
-                      target_end = i + 1
-                      break
-
-          if target_end is None:
-              raise SystemExit(
-                  "ERROR: Could not parse Runner target."
-              )
-
-          runner_block = text[target_start:target_end]
-
-          # -----------------------------------------------------
-          # Find Runner buildConfigurationList.
-          # -----------------------------------------------------
-          config_list_match = re.search(
-              r'buildConfigurationList\s*=\s*'
-              r'([A-F0-9]{24})\s*/\* '
-              r'Build configuration list for PBXNativeTarget "Runner"'
-              r' \*/',
-              runner_block
-          )
-
-          if not config_list_match:
-              raise SystemExit(
-                  "ERROR: Runner build configuration list was not found."
-              )
-
-          config_list_id = config_list_match.group(1)
-
-          print(
-              f"Runner configuration list: {config_list_id}"
-          )
-
-          # -----------------------------------------------------
-          # Find the actual configuration list.
-          # -----------------------------------------------------
-          config_list_pattern = re.compile(
-              rf'{config_list_id}\s*/\* '
-              r'Build configuration list for PBXNativeTarget "Runner"'
-              r' \*/\s*=\s*\{(.*?)\n\s*\};',
-              re.DOTALL
-          )
-
-          config_list_match = config_list_pattern.search(text)
-
-          if not config_list_match:
-              raise SystemExit(
-                  "ERROR: Runner configuration list block was not found."
-              )
-
-          config_list_body = config_list_match.group(1)
-
-          # -----------------------------------------------------
-          # Extract Runner configuration IDs.
-          # -----------------------------------------------------
-          configurations = re.findall(
-              r'([A-F0-9]{24})\s*/\*\s*(Debug|Release|Profile)\s*\*/',
-              config_list_body
-          )
-
-          if not configurations:
-              raise SystemExit(
-                  "ERROR: No Runner build configurations were found."
-              )
-
-          print("")
-          print("Runner configurations:")
-
-          release_id = None
-
-          for config_id, config_name in configurations:
-              print(
-                  f"  {config_name}: {config_id}"
-              )
-
-              if config_name == "Release":
-                  release_id = config_id
-
-          if release_id is None:
+          if start == -1:
               raise SystemExit(
                   "ERROR: Runner Release configuration was not found."
               )
 
-          print("")
-          print(
-              f"Runner Release configuration ID: {release_id}"
-          )
+          end = text.find("\n\t\t};", start)
 
-          # -----------------------------------------------------
-          # Find Release configuration block.
-          # -----------------------------------------------------
-          release_pattern = re.compile(
-              rf'{release_id}\s*/\*\s*Release\s*\*/\s*=\s*\{{'
-              r'(.*?)'
-              r'\n\s*\};',
-              re.DOTALL
-          )
-
-          release_match = release_pattern.search(text)
-
-          if not release_match:
+          if end == -1:
               raise SystemExit(
-                  "ERROR: Runner Release configuration block was not found."
+                  "ERROR: Could not determine Runner Release block."
               )
 
-          release_body = release_match.group(1)
+          end += len("\n\t\t};")
 
-          # -----------------------------------------------------
-          # Remove existing signing settings ONLY from Runner
-          # Release configuration.
-          # -----------------------------------------------------
-          signing_patterns = [
+          block = text[start:end]
+
+          # Remove existing signing values ONLY from Runner Release.
+          patterns = [
               r'^\s*CODE_SIGN_STYLE\s*=\s*[^;]+;\s*$',
               r'^\s*CODE_SIGN_IDENTITY\s*=\s*[^;]+;\s*$',
               r'^\s*DEVELOPMENT_TEAM\s*=\s*[^;]+;\s*$',
@@ -402,102 +289,137 @@ jobs:
               r'^\s*PROVISIONING_PROFILE\s*=\s*[^;]+;\s*$',
           ]
 
-          for pattern in signing_patterns:
-              release_body = re.sub(
+          for pattern in patterns:
+              block = re.sub(
                   pattern,
                   "",
-                  release_body,
+                  block,
                   flags=re.MULTILINE
               )
 
-          # -----------------------------------------------------
-          # Add signing ONLY to Runner Release.
-          # -----------------------------------------------------
-          signing_settings = f"""
+          profile_uuid = os.environ["IOS_PROFILE_UUID"]
+
+          signing = f"""
                   CODE_SIGN_STYLE = Manual;
                   CODE_SIGN_IDENTITY = "Apple Distribution";
                   DEVELOPMENT_TEAM = PR4R9G4HZ3;
-                  PROVISIONING_PROFILE_SPECIFIER = "{__import__('os').environ['IOS_PROFILE_UUID']}";
+                  PROVISIONING_PROFILE_SPECIFIER = "{profile_uuid}";
           """
 
-          release_body = (
-              release_body.rstrip()
-              + "\n"
-              + signing_settings
+          insert_at = block.rfind("\n\t\t};")
+
+          if insert_at == -1:
+              raise SystemExit(
+                  "ERROR: Could not insert signing settings."
+              )
+
+          block = (
+              block[:insert_at]
+              + signing
+              + block[insert_at:]
           )
 
-          # -----------------------------------------------------
-          # Write modified block back.
-          # -----------------------------------------------------
           text = (
-              text[:release_match.start(1)]
-              + release_body
-              + text[release_match.end(1):]
+              text[:start]
+              + block
+              + text[end:]
           )
 
           path.write_text(text)
 
           print("")
           print("========================================")
-          print("RUNNER DISTRIBUTION SIGNING CONFIGURED")
+          print("RUNNER SIGNING CONFIGURED")
           print("========================================")
           print("Team:       PR4R9G4HZ3")
           print("Identity:   Apple Distribution")
-          print(
-              "Profile:    "
-              + __import__('os').environ['IOS_PROFILE_UUID']
-          )
+          print("Profile:    " + profile_uuid)
           print("Bundle ID:  com.agdevelops.ainotescanner")
           print("========================================")
           PY
 
 
       # =========================================================
-      # 10. VERIFY PROJECT SIGNING SETTINGS
+      # 10. VERIFY RUNNER SIGNING
       # =========================================================
-      - name: Verify Runner Signing Configuration
+      - name: Verify Runner Signing
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "Checking Runner project..."
+          echo "Checking Runner Release signing settings..."
 
-          grep -n \
-            "Apple Distribution" \
-            ios/Runner.xcodeproj/project.pbxproj || true
+          python3 <<'PY'
+          from pathlib import Path
 
-          echo ""
+          text = Path(
+              "ios/Runner.xcodeproj/project.pbxproj"
+          ).read_text()
 
-          grep -n \
-            "PR4R9G4HZ3" \
-            ios/Runner.xcodeproj/project.pbxproj || true
+          marker = "97C147071CF9000F007C117D /* Release */ = {"
 
-          echo ""
+          start = text.find(marker)
 
-          grep -n \
-            "PROVISIONING_PROFILE_SPECIFIER" \
-            ios/Runner.xcodeproj/project.pbxproj || true
+          if start == -1:
+              raise SystemExit(
+                  "ERROR: Runner Release configuration not found."
+              )
+
+          end = text.find("\n\t\t};", start)
+
+          if end == -1:
+              raise SystemExit(
+                  "ERROR: Runner Release block could not be read."
+              )
+
+          block = text[start:end]
+
+          required = [
+              'CODE_SIGN_STYLE = Manual;',
+              'CODE_SIGN_IDENTITY = "Apple Distribution";',
+              'DEVELOPMENT_TEAM = PR4R9G4HZ3;',
+              'PROVISIONING_PROFILE_SPECIFIER = "4ed3491e-53d9-4e60-a4ca-fc4d247eb428";',
+          ]
+
+          for item in required:
+              if item not in block:
+                  print("")
+                  print("MISSING:", item)
+                  print("")
+                  print(block)
+                  raise SystemExit(
+                      "ERROR: Runner signing configuration is incomplete."
+                  )
+
+          print("Runner signing configuration verified.")
+          PY
 
 
       # =========================================================
       # 11. BUILD IPA
       #
-      # IMPORTANT:
-      # NO GLOBAL CODE_SIGN_IDENTITY
-      # NO GLOBAL DEVELOPMENT_TEAM
-      # NO GLOBAL PROVISIONING_PROFILE
-      # NO GLOBAL PROVISIONING_PROFILE_SPECIFIER
+      # NO GLOBAL SIGNING PARAMETERS.
       #
-      # Therefore Firebase / Pods / Swift Packages do not
-      # receive the Runner provisioning profile.
+      # This prevents the provisioning profile from being applied
+      # to Firebase, GoogleUtilities, Pods and Swift Packages.
       # =========================================================
       - name: Build IPA
         env:
           GENERATION_API_BASE_URL: ${{ env.GENERATION_API_BASE_URL }}
         run: |
-          set -e
+          set -euo pipefail
+
+          echo "========================================"
+          echo "BUILDING VYRO IOS IPA"
+          echo "========================================"
+          echo "Bundle ID: $BUNDLE_ID"
+          echo "Team: $DEVELOPMENT_TEAM"
+          echo "Backend: $GENERATION_API_BASE_URL"
+          echo "Profile: $IOS_PROFILE_UUID"
+          echo "========================================"
 
           flutter build ipa \
             --release \
+            --dart-define=GENERATION_API_BASE_URL="$GENERATION_API_BASE_URL" \
             --export-options-plist=ios/ExportOptions.plist
 
 
@@ -506,9 +428,9 @@ jobs:
       # =========================================================
       - name: Verify IPA
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "Checking generated IPA..."
+          echo "Generated IPA files:"
 
           find build/ios/ipa \
             -maxdepth 1 \
@@ -526,21 +448,18 @@ jobs:
           )
 
           if [ "$IPA_COUNT" -eq 0 ]; then
-            echo ""
             echo "ERROR: No IPA was generated."
             exit 1
           fi
 
           echo ""
-          echo "========================================"
-          echo "IPA GENERATED SUCCESSFULLY"
-          echo "========================================"
+          echo "IPA generated successfully."
 
 
       # =========================================================
       # 13. UPLOAD IPA
       # =========================================================
-      - name: Upload IPA Artifact
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: vyro-ios-ipa
