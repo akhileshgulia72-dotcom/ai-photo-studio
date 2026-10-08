@@ -2,22 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Export method used by `flutter build ipa` via the export options file.
-	     app-store is the correct method for TestFlight and App Store uploads. -->
 	<key>method</key>
 	<string>app-store</string>
 
-	<!-- Automatic signing: the distribution certificate and App Store
-	     provisioning profile are installed into a temporary keychain by the
-	     iOS Release workflow before this runs. -->
 	<key>signingStyle</key>
 	<string>automatic</string>
 
-	<!-- Bitcode is deprecated and not produced by modern Flutter builds. -->
 	<key>uploadBitcode</key>
 	<false/>
 
-	<!-- Upload the dSYMs so App Store Connect can symbolicate crashes. -->
 	<key>uploadSymbols</key>
 	<true/>
 
