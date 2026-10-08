@@ -25,6 +25,55 @@ jobs:
         uses: actions/checkout@v4
 
       # =========================================================
+      # 2. SELECT XCODE 26.3 / IOS 26 SDK
+      #
+      # macos-15 contains multiple Xcode versions. Explicitly select
+      # Xcode 26.3 so App Store Connect receives an iOS 26 SDK build.
+      # =========================================================
+      - name: Select Xcode 26.3
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          XCODE_PATH="/Applications/Xcode_26.3.app"
+
+          echo "========================================"
+          echo "SELECTING XCODE 26.3"
+          echo "========================================"
+
+          if [ ! -d "$XCODE_PATH" ]; then
+            echo "ERROR: Xcode 26.3 was not found at $XCODE_PATH"
+            echo "Available Xcode installations:"
+            ls -ld /Applications/Xcode*.app 2>/dev/null || true
+            exit 1
+          fi
+
+          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
+          echo "DEVELOPER_DIR=$XCODE_PATH/Contents/Developer" >> "$GITHUB_ENV"
+          export DEVELOPER_DIR="$XCODE_PATH/Contents/Developer"
+
+          echo "Selected Xcode:"
+          xcodebuild -version
+          echo "Developer directory:"
+          xcode-select -p
+          echo "Available iOS SDKs:"
+          xcodebuild -showsdks | grep -E "iphoneos|iPhoneOS" || true
+
+          if ! xcodebuild -showsdks | grep -q "iphoneos26"; then
+            echo "ERROR: iOS 26 SDK was not found."
+            xcodebuild -showsdks
+            exit 1
+          fi
+
+          SDK_VERSION="$(xcrun --sdk iphoneos --show-sdk-version)"
+          case "$SDK_VERSION" in
+            26.*) echo "iOS SDK $SDK_VERSION confirmed." ;;
+            *) echo "ERROR: Unexpected iOS SDK version: $SDK_VERSION"; exit 1 ;;
+          esac
+
+          echo "Xcode 26.3 / iOS 26 SDK validation PASSED."
+
+      # =========================================================
       # 2. PREFLIGHT - SECRET VALIDATION
       #
       # GitHub substitutes an empty string for a secret it cannot
@@ -936,8 +985,26 @@ jobs:
       # configuration only, and the Pods keep automatic signing.
       # =========================================================
       - name: Archive VYRO
+        env:
+          DEVELOPER_DIR: "/Applications/Xcode_26.3.app/Contents/Developer"
         run: |
           set -euo pipefail
+
+          echo "========================================"
+          echo "FINAL SDK CHECK BEFORE ARCHIVE"
+          echo "========================================"
+          xcodebuild -version
+          xcode-select -p
+          SDK_VERSION="$(xcrun --sdk iphoneos --show-sdk-version)"
+          echo "iOS SDK: $SDK_VERSION"
+          case "$SDK_VERSION" in
+            26.*) echo "iOS 26 SDK confirmed. Continuing archive." ;;
+            *) echo "ERROR: Archive would use non-iOS-26 SDK: $SDK_VERSION"; exit 1 ;;
+          esac
+
+          echo "========================================"
+          echo "ARCHIVING VYRO"
+          echo "========================================"
 
           echo "========================================"
           echo "ARCHIVING VYRO"
@@ -1075,8 +1142,19 @@ jobs:
       # 16. EXPORT IPA
       # =========================================================
       - name: Export IPA
+        env:
+          DEVELOPER_DIR: "/Applications/Xcode_26.3.app/Contents/Developer"
         run: |
           set -euo pipefail
+
+          echo "Xcode used for export:"
+          xcodebuild -version
+
+          mkdir -p "$RUNNER_TEMP/export"
+
+          echo "========================================"
+          echo "EXPORTING IPA"
+          echo "========================================"
 
           mkdir -p "$RUNNER_TEMP/export"
 
