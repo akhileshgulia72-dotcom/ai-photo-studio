@@ -462,7 +462,100 @@ jobs:
           pod install --repo-update
 
       # =========================================================
-      # 10. SCOPE SIGNING TO THE RUNNER APP TARGET
+      # 10. MATCH THE GENERATED SWIFT PACKAGE TO THE APP DEPLOYMENT TARGET
+      #
+      # Flutter declares its iOS floor as a hard-coded iOS 13.0 in
+      # flutter_tools (darwin.dart: Version(13, 0, null)), so the
+      # generated FlutterGeneratedPluginSwiftPackage/Package.swift
+      # declares:
+      #     platforms: [ .iOS("13.0") ]
+      #
+      # Swift Package Manager then refuses any dependency whose floor is
+      # higher, which breaks the Firebase products that require 15.0:
+      #     "The package product 'firebase-core' requires minimum
+      #      platform version 15.0 for the iOS platform, but this target
+      #      supports 13.0"
+      #
+      # Flutter ships the correct repair as
+      # SwiftPackageManager.updateMinimumDeployment, which raises this
+      # package to the Xcode project's IPHONEOS_DEPLOYMENT_TARGET. It is
+      # guarded by `if (app.project.usesSwiftPackageManager)`
+      # (ios/mac.dart:352), and a stale
+      # swift_package_manager_enabled['ios'] = false in
+      # .flutter-plugins-dependencies means that branch is skipped.
+      #
+      # This applies exactly the bump Flutter would have applied. It is
+      # idempotent, and it fails loudly rather than letting the archive
+      # fail later with less context.
+      # =========================================================
+      - name: Align generated Swift package platform with the app
+        run: |
+          set -euo pipefail
+
+          PBXPROJ="ios/Runner.xcodeproj/project.pbxproj"
+          MANIFEST="ios/Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage/Package.swift"
+
+          echo "========================================"
+          echo "ALIGNING SWIFT PACKAGE PLATFORM"
+          echo "========================================"
+
+          if [ ! -f "$MANIFEST" ]; then
+            echo "ERROR: generated Swift package manifest not found:"
+            echo "  $MANIFEST"
+            echo "It is written by 'flutter pub get'. Ensure that step ran."
+            exit 1
+          fi
+
+          TARGET=$(
+            grep -m1 'IPHONEOS_DEPLOYMENT_TARGET' "$PBXPROJ" \
+              | sed 's/.*= *\([0-9.]*\);.*/\1/'
+          )
+
+          if [ -z "$TARGET" ]; then
+            echo "ERROR: could not read IPHONEOS_DEPLOYMENT_TARGET from the project."
+            exit 1
+          fi
+
+          echo "App iOS deployment target : $TARGET"
+          echo "Manifest before:"
+          sed 's/^/    /' "$MANIFEST"
+
+          python3 - "$MANIFEST" "$TARGET" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          manifest = Path(sys.argv[1])
+          target = sys.argv[2]
+
+          text = manifest.read_text()
+          updated, count = re.subn(
+              r'\.iOS\("[0-9.]+"\)',
+              '.iOS("' + target + '")',
+              text,
+          )
+
+          if count == 0:
+              raise SystemExit(
+                  'ERROR: no .iOS("...") entry found in the generated manifest.'
+              )
+
+          manifest.write_text(updated)
+          print('Raised ' + str(count) + ' platform entry to iOS ' + target + '.')
+          PY
+
+          echo "Manifest after:"
+          sed 's/^/    /' "$MANIFEST"
+
+          if ! grep -q ".iOS(\"$TARGET\")" "$MANIFEST"; then
+            echo "ERROR: manifest still does not declare iOS $TARGET."
+            exit 1
+          fi
+
+          echo ""
+          echo "Generated Swift package now targets iOS $TARGET."
+      # =========================================================
+      # 11. SCOPE SIGNING TO THE RUNNER APP TARGET
       #
       # Signing is applied ONLY to the three Runner app
       # XCBuildConfiguration blocks (Debug / Profile / Release).
@@ -686,7 +779,7 @@ jobs:
 
 
       # =========================================================
-      # 11. ARCHIVE
+      # 12. ARCHIVE
       #
       # Signing is NOT passed as xcodebuild command-line arguments.
       # Global command-line build settings (DEVELOPMENT_TEAM,
@@ -756,7 +849,7 @@ jobs:
             archive
 
       # =========================================================
-      # 12. VERIFY ARCHIVE
+      # 13. VERIFY ARCHIVE
       # =========================================================
       - name: Verify archive
         run: |
@@ -774,7 +867,7 @@ jobs:
           ls -lah "$RUNNER_TEMP/VYRO.xcarchive"
 
       # =========================================================
-      # 13. EXPORT IPA
+      # 14. EXPORT IPA
       # =========================================================
       - name: Export IPA
         run: |
@@ -797,7 +890,7 @@ jobs:
           ls -lah "$RUNNER_TEMP/export"
 
       # =========================================================
-      # 14. VERIFY IPA
+      # 15. VERIFY IPA
       # =========================================================
       - name: Verify IPA
         run: |
@@ -822,7 +915,7 @@ jobs:
           cp "$IPA" "$RUNNER_TEMP/VYRO.ipa"
 
       # =========================================================
-      # 15. UPLOAD IPA ARTIFACT
+      # 16. UPLOAD IPA ARTIFACT
       # =========================================================
       - name: Upload IPA
         uses: actions/upload-artifact@v4
@@ -832,7 +925,7 @@ jobs:
           if-no-files-found: error
 
       # =========================================================
-      # 16. UPLOAD ARCHIVE
+      # 17. UPLOAD ARCHIVE
       # =========================================================
       - name: Upload XCArchive
         uses: actions/upload-artifact@v4
@@ -842,7 +935,7 @@ jobs:
           if-no-files-found: error
 
       # =========================================================
-      # 17. UPLOAD TO APP STORE CONNECT / TESTFLIGHT
+      # 18. UPLOAD TO APP STORE CONNECT / TESTFLIGHT
       #
       # Authenticates with an App Store Connect API key. The three
       # secrets below are read from the environment, never printed
@@ -955,7 +1048,7 @@ jobs:
           echo "========================================"
 
       # =========================================================
-      # 18. CLEAN UP SIGNING MATERIAL
+      # 19. CLEAN UP SIGNING MATERIAL
       # =========================================================
       - name: Clean up signing keychain and credentials
         if: always()
