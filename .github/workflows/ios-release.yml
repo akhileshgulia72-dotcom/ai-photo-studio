@@ -451,7 +451,70 @@ jobs:
           flutter pub get
 
       # =========================================================
-      # 9. COCOAPODS
+      # 9. VERIFY THE PODS XCCONFIG INCLUDE
+      #
+      # The Runner target has no baseConfigurationReference set, so the
+      # ONLY path by which it inherits the CocoaPods build settings is the
+      # `#include? "Pods/Target Support Files/Pods-Runner/..."` line in
+      # Flutter/Debug.xcconfig and Flutter/Release.xcconfig.
+      #
+      # Without it the Runner target cannot see PODFILE_LOCK (or the Pods
+      # framework search paths), and the archive fails with:
+      #     diff: /Podfile.lock: No such file or directory
+      #     error: The sandbox is not in sync with the Podfile.lock
+      #
+      # flutter_tools normally injects this line in
+      # addPodsDependencyToFlutterXcconfig, but that runs from
+      # setupPodfile during a *Flutter* build, and this job archives with
+      # xcodebuild directly, so it never happens here.
+      #
+      # The lines are committed; this fails fast if a future
+      # `flutter clean` or template change drops them.
+      # =========================================================
+      - name: Verify Pods xcconfig include
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "PODS XCCONFIG INCLUDE"
+          echo "========================================"
+
+          failed=0
+
+          for pair in "Debug:debug" "Release:release"
+          do
+            file="ios/Flutter/${pair%%:*}.xcconfig"
+            mode="${pair##*:}"
+            expected="Pods/Target Support Files/Pods-Runner/Pods-Runner.${mode}.xcconfig"
+
+            echo ""
+            echo "--- $file ---"
+            cat "$file"
+
+            if grep -qF "$expected" "$file"; then
+              echo "  contains: $expected"
+            else
+              echo "ERROR: $file does not include the Pods xcconfig."
+              echo "Expected a line containing:"
+              echo "  $expected"
+              failed=1
+            fi
+          done
+
+          echo ""
+          echo "========================================"
+
+          if [ "$failed" -ne 0 ]; then
+            echo "ERROR: CocoaPods integration would not be wired into the"
+            echo "Runner target, so PODFILE_LOCK and the Pods search paths"
+            echo "would be missing and the archive would fail."
+            exit 1
+          fi
+
+          echo "Pods xcconfig is included by both configurations."
+
+      # =========================================================
+      # 10. COCOAPODS
       # =========================================================
       - name: Install CocoaPods dependencies
         run: |
@@ -462,7 +525,7 @@ jobs:
           pod install --repo-update
 
       # =========================================================
-      # 10. MATCH THE GENERATED SWIFT PACKAGE TO THE APP DEPLOYMENT TARGET
+      # 11. MATCH THE GENERATED SWIFT PACKAGE TO THE APP DEPLOYMENT TARGET
       #
       # Flutter declares its iOS floor as a hard-coded iOS 13.0 in
       # flutter_tools (darwin.dart: Version(13, 0, null)), so the
@@ -555,7 +618,7 @@ jobs:
           echo ""
           echo "Generated Swift package now targets iOS $TARGET."
       # =========================================================
-      # 11. SCOPE SIGNING TO THE RUNNER APP TARGET
+      # 12. SCOPE SIGNING TO THE RUNNER APP TARGET
       #
       # Signing is applied ONLY to the three Runner app
       # XCBuildConfiguration blocks (Debug / Profile / Release).
@@ -779,7 +842,7 @@ jobs:
 
 
       # =========================================================
-      # 12. RE-SYNC COCOAPODS AFTER THE PROJECT WAS MODIFIED
+      # 13. RE-SYNC COCOAPODS AFTER THE PROJECT WAS MODIFIED
       #
       # The 'Configure Runner target signing' step rewrites
       # Runner.xcodeproj/project.pbxproj to apply
@@ -834,17 +897,32 @@ jobs:
             exit 1
           fi
 
-          # The value the [CP] Check Pods Manifest.lock script relies on.
+          # Confirm the value the [CP] Check Pods Manifest.lock script relies
+          # on is present in the Pods xcconfig the Runner target inherits.
           echo ""
-          echo "PODFILE_LOCK from the generated xcconfig:"
-          grep -h 'PODFILE_LOCK' Pods/Target\ Support\ Files/Pods-Runner/*.xcconfig 2>/dev/null || true
+          echo "PODFILE_LOCK in the Pods xcconfig Runner inherits:"
+
+          pods_xcconfig="Pods/Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"
+
+          if [ -f "$pods_xcconfig" ]; then
+            grep 'PODFILE_LOCK' "$pods_xcconfig" || echo "  (no PODFILE_LOCK line in it)"
+          else
+            echo "  ERROR: $pods_xcconfig not found."
+            ls -la "Pods/Target Support Files" 2>/dev/null || true
+            exit 1
+          fi
+
+          echo ""
+          echo "Pods include present in the Runner configurations:"
+          grep -h 'Pods-Runner' Flutter/Debug.xcconfig Flutter/Release.xcconfig || true
 
           echo ""
           echo "========================================"
           echo "COCOAPODS RE-SYNCED"
           echo "========================================"
+
       # =========================================================
-      # 13. ARCHIVE
+      # 14. ARCHIVE
       #
       # Signing is NOT passed as xcodebuild command-line arguments.
       # Global command-line build settings (DEVELOPMENT_TEAM,
@@ -961,7 +1039,7 @@ jobs:
           echo "========================================"
 
       # =========================================================
-      # 14. VERIFY ARCHIVE
+      # 15. VERIFY ARCHIVE
       # =========================================================
       - name: Verify archive
         run: |
@@ -994,7 +1072,7 @@ jobs:
           if-no-files-found: warn
 
       # =========================================================
-      # 15. EXPORT IPA
+      # 16. EXPORT IPA
       # =========================================================
       - name: Export IPA
         run: |
@@ -1041,7 +1119,7 @@ jobs:
           ls -lah "$RUNNER_TEMP/export"
 
       # =========================================================
-      # 16. VERIFY IPA
+      # 17. VERIFY IPA
       # =========================================================
       - name: Verify IPA
         run: |
@@ -1066,7 +1144,7 @@ jobs:
           cp "$IPA" "$RUNNER_TEMP/VYRO.ipa"
 
       # =========================================================
-      # 17. UPLOAD IPA ARTIFACT
+      # 18. UPLOAD IPA ARTIFACT
       # =========================================================
       - name: Upload IPA
         uses: actions/upload-artifact@v4
@@ -1076,7 +1154,7 @@ jobs:
           if-no-files-found: error
 
       # =========================================================
-      # 18. UPLOAD ARCHIVE
+      # 19. UPLOAD ARCHIVE
       # =========================================================
       - name: Upload XCArchive
         uses: actions/upload-artifact@v4
@@ -1086,7 +1164,7 @@ jobs:
           if-no-files-found: error
 
       # =========================================================
-      # 19. UPLOAD TO APP STORE CONNECT / TESTFLIGHT
+      # 20. UPLOAD TO APP STORE CONNECT / TESTFLIGHT
       #
       # Authenticates with an App Store Connect API key. The three
       # secrets below are read from the environment, never printed
@@ -1199,7 +1277,7 @@ jobs:
           echo "========================================"
 
       # =========================================================
-      # 20. CLEAN UP SIGNING MATERIAL
+      # 21. CLEAN UP SIGNING MATERIAL
       # =========================================================
       - name: Clean up signing keychain and credentials
         if: always()
