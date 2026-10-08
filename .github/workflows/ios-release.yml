@@ -25,7 +25,87 @@ jobs:
         uses: actions/checkout@v4
 
       # =========================================================
-      # 2. FLUTTER
+      # 2. PREFLIGHT - SECRET VALIDATION
+      #
+      # GitHub substitutes an empty string for a secret it cannot
+      # resolve, with no error of its own. This reports every
+      # missing secret in one pass, prints names and lengths only
+      # (never values), and fails before any signing work starts.
+      #
+      # The names below must match the repository secrets exactly.
+      # They are repository-scoped; this job declares no
+      # environment, so environment secrets would be invisible.
+      # =========================================================
+      - name: Validate required secrets
+        env:
+          S_CERT_B64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          S_CERT_PW: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          S_PROFILE_B64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+          S_KEYCHAIN_PW: ${{ secrets.KEYCHAIN_PASSWORD }}
+          S_ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          S_ASC_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          S_ASC_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: |
+          set -uo pipefail
+
+          echo "========================================"
+          echo "REQUIRED SECRETS"
+          echo "========================================"
+
+          failed=0
+
+          report() {
+            local name="$1"
+            local value="${2:-}"
+
+            if [ -z "$value" ]; then
+              printf '  MISSING  %-38s (empty or not set)\n' "$name"
+              failed=1
+            else
+              printf '  present  %-38s %s bytes\n' "$name" "${#value}"
+            fi
+          }
+
+          report "IOS_CERTIFICATE_BASE64"          "${S_CERT_B64:-}"
+          report "IOS_CERTIFICATE_PASSWORD"        "${S_CERT_PW:-}"
+          report "IOS_PROVISIONING_PROFILE_BASE64" "${S_PROFILE_B64:-}"
+          report "KEYCHAIN_PASSWORD"               "${S_KEYCHAIN_PW:-}"
+          report "APP_STORE_CONNECT_KEY_ID"        "${S_ASC_KEY_ID:-}"
+          report "APP_STORE_CONNECT_ISSUER_ID"     "${S_ASC_ISSUER:-}"
+          report "APP_STORE_CONNECT_PRIVATE_KEY"   "${S_ASC_KEY:-}"
+
+          echo "========================================"
+
+          if [ "$failed" -ne 0 ]; then
+            echo ""
+            echo "ERROR: one or more required secrets are missing."
+            echo ""
+            echo "Add them under:"
+            echo "  Settings > Secrets and variables > Actions"
+            echo "  > Repository secrets (NOT environment secrets)"
+            echo ""
+            echo "Expected values:"
+            echo "  IOS_CERTIFICATE_BASE64"
+            echo "      base64 of the Apple Distribution .p12 (single line)"
+            echo "  IOS_CERTIFICATE_PASSWORD"
+            echo "      the password set when exporting that .p12"
+            echo "  IOS_PROVISIONING_PROFILE_BASE64"
+            echo "      base64 of the App Store .mobileprovision (single line)"
+            echo "  KEYCHAIN_PASSWORD"
+            echo "      any random string; used for the temporary CI keychain"
+            echo "  APP_STORE_CONNECT_KEY_ID / _ISSUER_ID / _PRIVATE_KEY"
+            echo "      App Store Connect API key (Users and Access > Integrations)"
+            echo ""
+            echo "Note: GitHub ignores secrets larger than 48 KB and will"
+            echo "not report an error. A base64 .p12 is normally 5-10 KB."
+            echo ""
+            exit 1
+          fi
+
+          echo "All required secrets are present."
+
+      # =========================================================
+      # 3. FLUTTER
       # =========================================================
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -35,7 +115,7 @@ jobs:
           cache: true
 
       # =========================================================
-      # 3. FLUTTER DEPENDENCIES
+      # 4. FLUTTER DEPENDENCIES
       # =========================================================
       - name: Flutter Pub Get
         run: |
@@ -45,7 +125,7 @@ jobs:
           flutter pub get
 
       # =========================================================
-      # 4. INSTALL APPLE DISTRIBUTION CERTIFICATE
+      # 5. INSTALL APPLE DISTRIBUTION CERTIFICATE
       #
       # NOTE: this step intentionally does NOT run
       #   openssl pkcs12 -passin ...
@@ -61,8 +141,8 @@ jobs:
       # =========================================================
       - name: Install Apple Distribution certificate
         env:
-          CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+          CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
         run: |
           set -euo pipefail
 
@@ -98,12 +178,12 @@ jobs:
           # -----------------------------------------------------
 
           if [ -z "${CERTIFICATE_BASE64:-}" ]; then
-            echo "ERROR: IOS_DISTRIBUTION_CERTIFICATE_BASE64 is empty."
+            echo "ERROR: IOS_CERTIFICATE_BASE64 is empty."
             exit 1
           fi
 
           if [ -z "${CERTIFICATE_PASSWORD:-}" ]; then
-            echo "ERROR: IOS_DISTRIBUTION_CERTIFICATE_PASSWORD is empty."
+            echo "ERROR: IOS_CERTIFICATE_PASSWORD is empty."
             exit 1
           fi
 
@@ -237,7 +317,7 @@ jobs:
           echo "========================================"
 
       # =========================================================
-      # 5. VERIFY CERTIFICATE
+      # 6. VERIFY CERTIFICATE
       # =========================================================
       - name: Verify Apple Distribution certificate
         run: |
@@ -267,7 +347,7 @@ jobs:
           echo "Apple Distribution certificate found."
 
       # =========================================================
-      # 6. INSTALL PROVISIONING PROFILE
+      # 7. INSTALL PROVISIONING PROFILE
       # =========================================================
       - name: Install provisioning profile
         env:
@@ -361,7 +441,7 @@ jobs:
           echo "Provisioning profile installed successfully."
 
       # =========================================================
-      # 7. FLUTTER CLEAN
+      # 8. FLUTTER CLEAN
       # =========================================================
       - name: Flutter clean
         run: |
@@ -371,7 +451,7 @@ jobs:
           flutter pub get
 
       # =========================================================
-      # 8. COCOAPODS
+      # 9. COCOAPODS
       # =========================================================
       - name: Install CocoaPods dependencies
         run: |
@@ -382,7 +462,7 @@ jobs:
           pod install --repo-update
 
       # =========================================================
-      # 9. SCOPE SIGNING TO THE RUNNER APP TARGET
+      # 10. SCOPE SIGNING TO THE RUNNER APP TARGET
       #
       # Signing is applied ONLY to the three Runner app
       # XCBuildConfiguration blocks (Debug / Profile / Release).
@@ -606,7 +686,7 @@ jobs:
 
 
       # =========================================================
-      # 12. ARCHIVE
+      # 11. ARCHIVE
       #
       # Signing is NOT passed as xcodebuild command-line arguments.
       # Global command-line build settings (DEVELOPMENT_TEAM,
@@ -676,7 +756,7 @@ jobs:
             archive
 
       # =========================================================
-      # 13. VERIFY ARCHIVE
+      # 12. VERIFY ARCHIVE
       # =========================================================
       - name: Verify archive
         run: |
@@ -694,7 +774,7 @@ jobs:
           ls -lah "$RUNNER_TEMP/VYRO.xcarchive"
 
       # =========================================================
-      # 14. EXPORT IPA
+      # 13. EXPORT IPA
       # =========================================================
       - name: Export IPA
         run: |
@@ -717,7 +797,7 @@ jobs:
           ls -lah "$RUNNER_TEMP/export"
 
       # =========================================================
-      # 15. VERIFY IPA
+      # 14. VERIFY IPA
       # =========================================================
       - name: Verify IPA
         run: |
@@ -742,7 +822,7 @@ jobs:
           cp "$IPA" "$RUNNER_TEMP/VYRO.ipa"
 
       # =========================================================
-      # 16. UPLOAD IPA ARTIFACT
+      # 15. UPLOAD IPA ARTIFACT
       # =========================================================
       - name: Upload IPA
         uses: actions/upload-artifact@v4
@@ -752,7 +832,7 @@ jobs:
           if-no-files-found: error
 
       # =========================================================
-      # 17. UPLOAD ARCHIVE
+      # 16. UPLOAD ARCHIVE
       # =========================================================
       - name: Upload XCArchive
         uses: actions/upload-artifact@v4
@@ -762,7 +842,7 @@ jobs:
           if-no-files-found: error
 
       # =========================================================
-      # 18. UPLOAD TO APP STORE CONNECT / TESTFLIGHT
+      # 17. UPLOAD TO APP STORE CONNECT / TESTFLIGHT
       #
       # Authenticates with an App Store Connect API key. The three
       # secrets below are read from the environment, never printed
@@ -875,7 +955,7 @@ jobs:
           echo "========================================"
 
       # =========================================================
-      # 19. CLEAN UP SIGNING MATERIAL
+      # 18. CLEAN UP SIGNING MATERIAL
       # =========================================================
       - name: Clean up signing keychain and credentials
         if: always()
