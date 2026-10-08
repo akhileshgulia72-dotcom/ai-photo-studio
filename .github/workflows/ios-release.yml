@@ -17,15 +17,16 @@ jobs:
       GENERATION_API_BASE_URL: "https://vyro-api-jnz6yqjl4a-el.a.run.app"
 
     steps:
-      # ---------------------------------------------------------
+
+      # =========================================================
       # 1. CHECKOUT
-      # ---------------------------------------------------------
+      # =========================================================
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------------------------------------------------------
+      # =========================================================
       # 2. FLUTTER
-      # ---------------------------------------------------------
+      # =========================================================
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -33,18 +34,19 @@ jobs:
           channel: stable
           cache: true
 
-      # ---------------------------------------------------------
+      # =========================================================
       # 3. FLUTTER DEPENDENCIES
-      # ---------------------------------------------------------
+      # =========================================================
       - name: Flutter Pub Get
         run: |
           set -euo pipefail
+
           flutter --version
           flutter pub get
 
-      # ---------------------------------------------------------
-      # 4. CREATE TEMP KEYCHAIN
-      # ---------------------------------------------------------
+      # =========================================================
+      # 4. CREATE TEMPORARY KEYCHAIN
+      # =========================================================
       - name: Create temporary keychain
         env:
           CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
@@ -70,9 +72,12 @@ jobs:
             -p "$KEYCHAIN_PASSWORD" \
             "$KEYCHAIN_PATH"
 
-          echo "$CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/apple_distribution.p12"
+          echo "$CERTIFICATE_BASE64" \
+            | base64 --decode \
+            > "$RUNNER_TEMP/apple_distribution.p12"
 
-          security import "$RUNNER_TEMP/apple_distribution.p12" \
+          security import \
+            "$RUNNER_TEMP/apple_distribution.p12" \
             -k "$KEYCHAIN_PATH" \
             -P "$CERTIFICATE_PASSWORD" \
             -T /usr/bin/codesign \
@@ -85,30 +90,44 @@ jobs:
             -k "$KEYCHAIN_PASSWORD" \
             "$KEYCHAIN_PATH"
 
-          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
-          security default-keychain -s "$KEYCHAIN_PATH"
+          security list-keychains \
+            -d user \
+            -s "$KEYCHAIN_PATH" login.keychain-db
 
-      # ---------------------------------------------------------
+          security default-keychain \
+            -s "$KEYCHAIN_PATH"
+
+          echo "Temporary keychain created."
+
+      # =========================================================
       # 5. VERIFY DISTRIBUTION CERTIFICATE
-      # ---------------------------------------------------------
+      # =========================================================
       - name: Verify Apple Distribution certificate
         run: |
           set -euo pipefail
 
-          echo "Available signing identities:"
-          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+          echo "Available code signing identities:"
+          security find-identity \
+            -v \
+            -p codesigning \
+            "$KEYCHAIN_PATH"
 
-          if ! security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+          if ! security find-identity \
+            -v \
+            -p codesigning \
+            "$KEYCHAIN_PATH" \
             | grep -q "Apple Distribution"; then
-            echo "ERROR: Apple Distribution certificate was not found."
+
+            echo "ERROR: Apple Distribution certificate not found."
             exit 1
           fi
 
+          echo ""
           echo "Apple Distribution certificate found."
 
-      # ---------------------------------------------------------
+      # =========================================================
       # 6. INSTALL PROVISIONING PROFILE
-      # ---------------------------------------------------------
+      # =========================================================
       - name: Install provisioning profile
         env:
           PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
@@ -117,9 +136,12 @@ jobs:
 
           PROFILE_PATH="$RUNNER_TEMP/vyro.mobileprovision"
 
-          echo "$PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
+          echo "$PROFILE_BASE64" \
+            | base64 --decode \
+            > "$PROFILE_PATH"
 
-          security cms -D \
+          security cms \
+            -D \
             -i "$PROFILE_PATH" \
             > "$RUNNER_TEMP/profile.plist"
 
@@ -147,26 +169,33 @@ jobs:
               "$RUNNER_TEMP/profile.plist"
           )
 
-          echo "PROFILE UUID: $PROFILE_UUID"
+          echo "========================================"
+          echo "PROVISIONING PROFILE"
+          echo "========================================"
           echo "PROFILE NAME: $PROFILE_NAME"
+          echo "PROFILE UUID: $PROFILE_UUID"
           echo "PROFILE TEAM: $PROFILE_TEAM"
           echo "PROFILE APP ID: $PROFILE_APP_ID"
+          echo "========================================"
 
           EXPECTED_APP_ID="${TEAM_ID}.${BUNDLE_ID}"
 
           if [ "$PROFILE_TEAM" != "$TEAM_ID" ]; then
-            echo "ERROR: Provisioning profile Team ID does not match."
+            echo "ERROR: Team ID mismatch."
+            echo "Expected: $TEAM_ID"
+            echo "Actual:   $PROFILE_TEAM"
             exit 1
           fi
 
           if [ "$PROFILE_APP_ID" != "$EXPECTED_APP_ID" ]; then
-            echo "ERROR: Provisioning profile Bundle ID does not match."
+            echo "ERROR: Bundle ID mismatch."
             echo "Expected: $EXPECTED_APP_ID"
             echo "Actual:   $PROFILE_APP_ID"
             exit 1
           fi
 
-          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p \
+            "$HOME/Library/MobileDevice/Provisioning Profiles"
 
           cp "$PROFILE_PATH" \
             "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
@@ -176,15 +205,16 @@ jobs:
 
           echo "Provisioning profile installed successfully."
 
-      # ---------------------------------------------------------
+      # =========================================================
       # 7. VERIFY PROFILE
-      # ---------------------------------------------------------
+      # =========================================================
       - name: Verify provisioning profile
         run: |
           set -euo pipefail
 
-          echo "Installed profiles:"
-          ls -lah "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "Installed provisioning profiles:"
+          ls -lah \
+            "$HOME/Library/MobileDevice/Provisioning Profiles"
 
           echo ""
           echo "Profile UUID:"
@@ -194,18 +224,19 @@ jobs:
           echo "Profile Name:"
           echo "$IOS_PROFILE_NAME"
 
-      # ---------------------------------------------------------
-      # 8. CLEAN FLUTTER
-      # ---------------------------------------------------------
+      # =========================================================
+      # 8. FLUTTER CLEAN
+      # =========================================================
       - name: Flutter clean
         run: |
           set -euo pipefail
+
           flutter clean
           flutter pub get
 
-      # ---------------------------------------------------------
-      # 9. POD INSTALL
-      # ---------------------------------------------------------
+      # =========================================================
+      # 9. COCOAPODS
+      # =========================================================
       - name: Install CocoaPods dependencies
         run: |
           set -euo pipefail
@@ -214,30 +245,88 @@ jobs:
 
           pod install --repo-update
 
-      # ---------------------------------------------------------
-      # 10. CONFIGURE ONLY RUNNER RELEASE SIGNING
-      # ---------------------------------------------------------
-      - name: Configure Runner Release signing
+      # =========================================================
+      # 10. FIX TEAM ID IN PROJECT
+      # =========================================================
+      - name: Fix Apple Team ID
         run: |
           set -euo pipefail
 
           PBXPROJ="ios/Runner.xcodeproj/project.pbxproj"
 
           if [ ! -f "$PBXPROJ" ]; then
-            echo "ERROR: $PBXPROJ not found."
+            echo "ERROR: project.pbxproj not found."
             exit 1
           fi
 
+          echo "Fixing Apple Team ID..."
+
+          python3 - "$PBXPROJ" <<'PY'
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          text = path.read_text()
+
+          # Fix the old typo if it exists.
+          text = text.replace(
+              "PR4R9GAHZ3",
+              "PR4R9G4HZ3"
+          )
+
+          path.write_text(text)
+
+          print("Team ID fixed to PR4R9G4HZ3.")
+          PY
+
+          echo ""
+          echo "Checking Team ID..."
+
+          if grep -q "PR4R9GAHZ3" "$PBXPROJ"; then
+            echo "ERROR: Old Team ID still exists."
+            exit 1
+          fi
+
+          if ! grep -q "PR4R9G4HZ3" "$PBXPROJ"; then
+            echo "ERROR: Correct Team ID was not found."
+            exit 1
+          fi
+
+          echo "Team ID verification passed."
+
+      # =========================================================
+      # 11. CONFIGURE ONLY RUNNER RELEASE SIGNING
+      # =========================================================
+      - name: Configure Runner Release signing
+        run: |
+          set -euo pipefail
+
+          PBXPROJ="ios/Runner.xcodeproj/project.pbxproj"
+
+          RUNNER_TARGET_ID="97C146ED1CF9000F007C117D"
+          RUNNER_CONFIG_LIST_ID="97C147051CF9000F007C117D"
           RUNNER_RELEASE_ID="97C147071CF9000F007C117D"
 
-          echo "Configuring Runner Release:"
-          echo "  ID: $RUNNER_RELEASE_ID"
-          echo "  Team: $TEAM_ID"
-          echo "  Bundle: $BUNDLE_ID"
-          echo "  Profile UUID: $IOS_PROFILE_UUID"
+          echo "========================================"
+          echo "RUNNER SIGNING CONFIGURATION"
+          echo "========================================"
+          echo "Runner target:        $RUNNER_TARGET_ID"
+          echo "Runner config list:   $RUNNER_CONFIG_LIST_ID"
+          echo "Runner Release:       $RUNNER_RELEASE_ID"
+          echo "Team ID:              $TEAM_ID"
+          echo "Bundle ID:            $BUNDLE_ID"
+          echo "Profile UUID:         $IOS_PROFILE_UUID"
+          echo "========================================"
 
-          python3 - "$PBXPROJ" "$RUNNER_RELEASE_ID" "$TEAM_ID" "$IOS_PROFILE_UUID" "$BUNDLE_ID" <<'PY'
+          python3 - \
+            "$PBXPROJ" \
+            "$RUNNER_RELEASE_ID" \
+            "$TEAM_ID" \
+            "$IOS_PROFILE_UUID" \
+            "$BUNDLE_ID" <<'PY'
+
           import sys
+          import re
           from pathlib import Path
 
           pbxproj_path = Path(sys.argv[1])
@@ -254,67 +343,40 @@ jobs:
 
           if start == -1:
               raise SystemExit(
-                  f"ERROR: Runner Release configuration {release_id} was not found."
+                  f"ERROR: Runner Release ID {release_id} not found."
               )
 
-          next_config = text.find(
+          # Find the end of this XCBuildConfiguration block.
+          end = text.find(
               "\n\t\t};\n",
               start
           )
 
-          if next_config == -1:
+          if end == -1:
               raise SystemExit(
-                  "ERROR: Could not locate end of Runner Release configuration."
+                  "ERROR: Could not find end of Runner Release block."
               )
 
-          block_end = next_config + len("\n\t\t};\n")
+          end += len("\n\t\t};\n")
 
-          block = text[start:block_end]
+          block = text[start:end]
 
-          # Remove any previous signing values from this Runner Release block.
-          import re
-
-          block = re.sub(
+          # Remove previous signing settings.
+          patterns = [
               r'^\s*CODE_SIGN_STYLE\s*=\s*[^;]+;\s*\n?',
-              '',
-              block,
-              flags=re.MULTILINE
-          )
-
-          block = re.sub(
               r'^\s*CODE_SIGN_IDENTITY(?:\[sdk=iphoneos\*\])?\s*=\s*[^;]+;\s*\n?',
-              '',
-              block,
-              flags=re.MULTILINE
-          )
-
-          block = re.sub(
               r'^\s*DEVELOPMENT_TEAM\s*=\s*[^;]+;\s*\n?',
-              '',
-              block,
-              flags=re.MULTILINE
-          )
-
-          block = re.sub(
               r'^\s*PROVISIONING_PROFILE_SPECIFIER\s*=\s*[^;]+;\s*\n?',
-              '',
-              block,
-              flags=re.MULTILINE
-          )
-
-          block = re.sub(
               r'^\s*PROVISIONING_PROFILE\s*=\s*[^;]+;\s*\n?',
-              '',
-              block,
-              flags=re.MULTILINE
-          )
+          ]
 
-          signing = f'''\
-                  CODE_SIGN_STYLE = Manual;
-                  CODE_SIGN_IDENTITY = "Apple Distribution";
-                  DEVELOPMENT_TEAM = {team_id};
-                  PROVISIONING_PROFILE_SPECIFIER = "{profile_uuid}";
-          '''
+          for pattern in patterns:
+              block = re.sub(
+                  pattern,
+                  "",
+                  block,
+                  flags=re.MULTILINE
+              )
 
           settings_marker = "\t\tbuildSettings = {\n"
 
@@ -322,42 +384,51 @@ jobs:
 
           if settings_pos == -1:
               raise SystemExit(
-                  "ERROR: buildSettings block not found in Runner Release."
+                  "ERROR: Runner Release buildSettings not found."
               )
 
           insert_pos = settings_pos + len(settings_marker)
 
+          signing_settings = (
+              "\t\t\tCODE_SIGN_STYLE = Manual;\n"
+              '\t\t\tCODE_SIGN_IDENTITY = "Apple Distribution";\n'
+              f"\t\t\tDEVELOPMENT_TEAM = {team_id};\n"
+              f'\t\t\tPROVISIONING_PROFILE_SPECIFIER = "{profile_uuid}";\n'
+          )
+
           block = (
               block[:insert_pos]
-              + signing
+              + signing_settings
               + block[insert_pos:]
           )
 
-          # Ensure Bundle ID is correct in Runner Release.
+          # Make sure Bundle ID is correct.
           block = re.sub(
               r'^\s*PRODUCT_BUNDLE_IDENTIFIER\s*=\s*[^;]+;',
-              f'\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = {bundle_id};',
+              f'\t\t\tPRODUCT_BUNDLE_IDENTIFIER = {bundle_id};',
               block,
               flags=re.MULTILINE
           )
 
-          text = text[:start] + block + text[block_end:]
+          text = (
+              text[:start]
+              + block
+              + text[end:]
+          )
 
           pbxproj_path.write_text(text)
 
-          print("Runner Release signing configured successfully.")
+          print("Runner Release signing configured.")
           PY
 
-      # ---------------------------------------------------------
-      # 11. VERIFY PROJECT SIGNING CONFIG
-      # ---------------------------------------------------------
+      # =========================================================
+      # 12. VERIFY RUNNER SIGNING
+      # =========================================================
       - name: Verify Runner signing configuration
         run: |
           set -euo pipefail
 
           PBXPROJ="ios/Runner.xcodeproj/project.pbxproj"
-
-          echo "Checking Runner Release configuration..."
 
           python3 - "$PBXPROJ" <<'PY'
           import sys
@@ -369,46 +440,53 @@ jobs:
           release_id = "97C147071CF9000F007C117D"
 
           marker = f"{release_id} /* Release */ = {{"
+
           start = text.find(marker)
 
           if start == -1:
-              raise SystemExit("ERROR: Runner Release configuration not found.")
+              raise SystemExit(
+                  "ERROR: Runner Release configuration not found."
+              )
 
           end = text.find("\n\t\t};\n", start)
 
           if end == -1:
-              raise SystemExit("ERROR: Runner Release block end not found.")
+              raise SystemExit(
+                  "ERROR: Runner Release block is invalid."
+              )
 
           block = text[start:end]
 
           required = [
-              'CODE_SIGN_STYLE = Manual;',
+              "CODE_SIGN_STYLE = Manual;",
               'CODE_SIGN_IDENTITY = "Apple Distribution";',
-              'DEVELOPMENT_TEAM = PR4R9G4HZ3;',
+              "DEVELOPMENT_TEAM = PR4R9G4HZ3;",
               'PROVISIONING_PROFILE_SPECIFIER = "4ed3491e-53d9-4e60-a4ca-fc4d247eb428";',
-              'PRODUCT_BUNDLE_IDENTIFIER = com.agdevelops.ainotescanner;',
+              "PRODUCT_BUNDLE_IDENTIFIER = com.agdevelops.ainotescanner;",
           ]
 
-          for item in required:
-              if item not in block:
+          for setting in required:
+              if setting not in block:
                   raise SystemExit(
-                      f"ERROR: Missing Runner Release setting:\n{item}"
+                      "ERROR: Missing setting:\n" + setting
                   )
 
+          print("")
           print("========================================")
-          print("Runner Release signing configuration OK")
+          print("RUNNER SIGNING VERIFIED")
           print("========================================")
           print("CODE_SIGN_STYLE = Manual")
           print('CODE_SIGN_IDENTITY = "Apple Distribution"')
           print("DEVELOPMENT_TEAM = PR4R9G4HZ3")
           print("PROVISIONING_PROFILE_SPECIFIER = 4ed3491e-53d9-4e60-a4ca-fc4d247eb428")
           print("PRODUCT_BUNDLE_IDENTIFIER = com.agdevelops.ainotescanner")
+          print("========================================")
           PY
 
-      # ---------------------------------------------------------
-      # 12. SHOW XCODE SIGNING IDENTITIES
-      # ---------------------------------------------------------
-      - name: Show signing identities
+      # =========================================================
+      # 13. SHOW FINAL SIGNING IDENTITIES
+      # =========================================================
+      - name: Show final signing identities
         run: |
           set -euo pipefail
 
@@ -417,14 +495,16 @@ jobs:
             -p codesigning \
             "$KEYCHAIN_PATH"
 
-      # ---------------------------------------------------------
-      # 13. ARCHIVE WITH XCODE
-      # ---------------------------------------------------------
+      # =========================================================
+      # 14. ARCHIVE WITH XCODE
+      # =========================================================
       - name: Archive VYRO
         run: |
           set -euo pipefail
 
-          echo "Starting Xcode archive..."
+          echo "========================================"
+          echo "ARCHIVING VYRO"
+          echo "========================================"
 
           xcodebuild \
             -workspace ios/Runner.xcworkspace \
@@ -439,29 +519,34 @@ jobs:
             PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
             archive
 
-      # ---------------------------------------------------------
-      # 14. VERIFY ARCHIVE
-      # ---------------------------------------------------------
+      # =========================================================
+      # 15. VERIFY ARCHIVE
+      # =========================================================
       - name: Verify archive
         run: |
           set -euo pipefail
 
           if [ ! -d "$RUNNER_TEMP/VYRO.xcarchive" ]; then
-            echo "ERROR: Archive was not created."
+            echo "ERROR: VYRO.xcarchive was not created."
             exit 1
           fi
 
-          echo "Archive created successfully:"
+          echo "Archive created successfully."
+
           ls -lah "$RUNNER_TEMP/VYRO.xcarchive"
 
-      # ---------------------------------------------------------
-      # 15. EXPORT IPA
-      # ---------------------------------------------------------
+      # =========================================================
+      # 16. EXPORT IPA
+      # =========================================================
       - name: Export IPA
         run: |
           set -euo pipefail
 
           mkdir -p "$RUNNER_TEMP/export"
+
+          echo "========================================"
+          echo "EXPORTING IPA"
+          echo "========================================"
 
           xcodebuild \
             -exportArchive \
@@ -473,28 +558,34 @@ jobs:
           echo "Export directory:"
           ls -lah "$RUNNER_TEMP/export"
 
-      # ---------------------------------------------------------
-      # 16. FIND IPA
-      # ---------------------------------------------------------
+      # =========================================================
+      # 17. VERIFY IPA
+      # =========================================================
       - name: Verify IPA
         run: |
           set -euo pipefail
 
-          IPA="$(find "$RUNNER_TEMP/export" -maxdepth 1 -name '*.ipa' -print -quit)"
+          IPA="$(find "$RUNNER_TEMP/export" \
+            -maxdepth 1 \
+            -name '*.ipa' \
+            -print \
+            -quit)"
 
           if [ -z "$IPA" ]; then
-            echo "ERROR: No IPA was generated."
+            echo "ERROR: IPA was not generated."
             exit 1
           fi
 
-          echo "IPA generated:"
+          echo "========================================"
+          echo "IPA GENERATED SUCCESSFULLY"
+          echo "========================================"
           echo "$IPA"
 
           cp "$IPA" "$RUNNER_TEMP/VYRO.ipa"
 
-      # ---------------------------------------------------------
-      # 17. UPLOAD IPA
-      # ---------------------------------------------------------
+      # =========================================================
+      # 18. UPLOAD IPA
+      # =========================================================
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
@@ -502,9 +593,9 @@ jobs:
           path: ${{ runner.temp }}/VYRO.ipa
           if-no-files-found: error
 
-      # ---------------------------------------------------------
-      # 18. UPLOAD ARCHIVE
-      # ---------------------------------------------------------
+      # =========================================================
+      # 19. UPLOAD ARCHIVE
+      # =========================================================
       - name: Upload XCArchive
         uses: actions/upload-artifact@v4
         with:
