@@ -9,7 +9,7 @@ jobs:
 
     env:
       BUNDLE_ID: com.agdevelops.ainotescanner
-      DEVELOPMENT_TEAM: PR4R9GAHZ3
+      DEVELOPMENT_TEAM: PR4R9G4HZ3
       GENERATION_API_BASE_URL: https://vyro-api-jnz6yqjl4a-el.a.run.app
 
     steps:
@@ -267,7 +267,7 @@ jobs:
           signing = """
                   CODE_SIGN_STYLE = Manual;
                   CODE_SIGN_IDENTITY = "Apple Distribution";
-                  DEVELOPMENT_TEAM = PR4R9GAHZ3;
+                  DEVELOPMENT_TEAM = PR4R9G4HZ3;
                   PROVISIONING_PROFILE_SPECIFIER = "$(IOS_PROFILE_UUID)";
           """
 
