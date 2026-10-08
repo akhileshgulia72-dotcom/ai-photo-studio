@@ -46,6 +46,18 @@ jobs:
 
       # =========================================================
       # 4. INSTALL APPLE DISTRIBUTION CERTIFICATE
+      #
+      # NOTE: this step intentionally does NOT run
+      #   openssl pkcs12 -passin ...
+      # as a gate. Apple's Keychain exports .p12 files with legacy
+      # algorithms (RC2-40-CBC / 3DES) that OpenSSL 3.x rejects unless
+      # built with -legacy, and LibreSSL rejects differently. Both report
+      # the misleading "Mac verify error: invalid password?" even when the
+      # password is correct.
+      #
+      # Apple's own `security import` uses the Security framework, which
+      # reads Apple-exported .p12 files correctly, so it is the authority
+      # on whether the password is valid.
       # =========================================================
       - name: Install Apple Distribution certificate
         env:
@@ -97,6 +109,9 @@ jobs:
 
           # -----------------------------------------------------
           # Decode Base64 certificate
+          #
+          # The secret may be stored with line breaks or stray spaces,
+          # so strip CR/LF/space before decoding.
           # -----------------------------------------------------
 
           echo "$CERTIFICATE_BASE64" \
@@ -122,54 +137,67 @@ jobs:
           file "$CERT_PATH"
 
           # -----------------------------------------------------
-          # Validate P12 + password BEFORE security import
+          # Non-fatal diagnostics
+          #
+          # These print useful detail but never gate the build, because
+          # OpenSSL cannot be trusted to validate an Apple-exported p12.
           # -----------------------------------------------------
 
           echo ""
-          echo "Validating P12 certificate and password..."
+          echo "Password length: ${#CERTIFICATE_PASSWORD} characters"
+          echo "(Confirm this matches your export password length.)"
 
-          if ! openssl pkcs12 \
+          echo ""
+          echo "Diagnostic only - OpenSSL view of the p12 (may report a"
+          echo "false 'invalid password' on Apple-exported files):"
+          openssl pkcs12 \
             -in "$CERT_PATH" \
             -passin "pass:$CERTIFICATE_PASSWORD" \
             -nokeys \
             -clcerts \
-            -noout; then
-
-            echo ""
-            echo "========================================"
-            echo "P12 VALIDATION FAILED"
-            echo "========================================"
-            echo ""
-            echo "The GitHub certificate secret or password"
-            echo "is incorrect."
-            echo ""
-            echo "Check:"
-            echo "IOS_DISTRIBUTION_CERTIFICATE_BASE64"
-            echo "IOS_DISTRIBUTION_CERTIFICATE_PASSWORD"
-            echo ""
-            exit 1
-          fi
-
-          echo "P12 validation successful."
+            -noout \
+            && echo "OpenSSL: parsed OK" \
+            || echo "OpenSSL: could not parse (IGNORED - security import decides)"
 
           # -----------------------------------------------------
           # Import certificate
+          #
+          # Flags match the version of this workflow that worked:
+          #   -f pkcs12  input format
+          #   -t cert    import type
+          #   -A         let all applications use the imported key
+          #   -T ...     also explicitly allow codesign/security/xcodebuild
           # -----------------------------------------------------
 
           echo ""
           echo "Importing certificate into temporary keychain..."
 
-          security import "$CERT_PATH" \
+          if ! security import "$CERT_PATH" \
             -k "$KEYCHAIN_PATH" \
             -P "$CERTIFICATE_PASSWORD" \
+            -f pkcs12 \
+            -t cert \
+            -A \
             -T /usr/bin/codesign \
             -T /usr/bin/security \
-            -T /usr/bin/xcodebuild
+            -T /usr/bin/xcodebuild; then
+
+            echo ""
+            echo "========================================"
+            echo "CERTIFICATE IMPORT FAILED"
+            echo "========================================"
+            echo ""
+            echo "security import rejected the p12 or its password."
+            echo "Compare the 'Password length' printed above with the"
+            echo "password used when exporting the certificate."
+            echo ""
+            exit 1
+          fi
 
           echo "Certificate imported."
 
           # -----------------------------------------------------
-          # Give codesign access to private key
+          # Give codesign access to the private key
           # -----------------------------------------------------
 
           security set-key-partition-list \
@@ -188,6 +216,20 @@ jobs:
 
           security default-keychain \
             -s "$KEYCHAIN_PATH"
+
+          # -----------------------------------------------------
+          # Fail here, clearly, if the identity did not import
+          # -----------------------------------------------------
+
+          if ! security find-identity \
+            -v \
+            -p codesigning \
+            "$KEYCHAIN_PATH" \
+            | grep -q "Apple Distribution"; then
+
+            echo "ERROR: security import ran but no Apple Distribution identity is present."
+            exit 1
+          fi
 
           echo ""
           echo "========================================"
@@ -582,6 +624,11 @@ jobs:
           echo "========================================"
           echo "ARCHIVING VYRO"
           echo "========================================"
+
+          # Keep the keychain unlocked for codesign.
+          security unlock-keychain \
+            -p "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
 
           xcodebuild \
             -workspace ios/Runner.xcworkspace \
