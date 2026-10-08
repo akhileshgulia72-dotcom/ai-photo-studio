@@ -905,13 +905,60 @@ jobs:
           echo ""
           echo "Archiving (signing comes from the project, not the CLI)..."
 
+          # xcodebuild is verbose and its 'Disabling previews' notes dominate
+          # the tail of the log that GitHub surfaces on failure. Capture the
+          # full output and re-print every error line afterwards so the real
+          # cause is always visible.
+          set +e
           xcodebuild \
             -workspace ios/Runner.xcworkspace \
             -scheme Runner \
             -configuration Release \
             -sdk iphoneos \
             -archivePath "$RUNNER_TEMP/VYRO.xcarchive" \
-            archive
+            archive 2>&1 | tee "$RUNNER_TEMP/archive.log"
+          ARCHIVE_STATUS=${PIPESTATUS[0]}
+          set -e
+
+          echo ""
+          echo "xcodebuild exit status: $ARCHIVE_STATUS"
+
+          if [ "$ARCHIVE_STATUS" -ne 0 ]; then
+            echo ""
+            echo "========================================"
+            echo "ARCHIVE FAILED - ERROR LINES"
+            echo "========================================"
+
+            # Actual diagnostics.
+            grep -nE "(^| )error:|error: |fatal error:|does not support provisioning|No profiles for|could not find|is not in sync|requires a provisioning profile|Code Signing Error|The following build commands failed" \
+              "$RUNNER_TEMP/archive.log" \
+              | grep -vE "^[0-9]+:note:" \
+              || echo "  (no line matched the error patterns)"
+
+            echo ""
+            echo "========================================"
+            echo "ARCHIVE FAILED - LAST 60 LINES"
+            echo "========================================"
+            tail -n 60 "$RUNNER_TEMP/archive.log"
+
+            echo ""
+            echo "========================================"
+            echo "ARCHIVE FAILED - SIGNING CONTEXT"
+            echo "========================================"
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
+            echo ""
+            echo "Provisioning profiles installed:"
+            ls -1 "$HOME/Library/MobileDevice/Provisioning Profiles" 2>/dev/null || echo "  (none)"
+            echo ""
+            echo "Archive log saved at: $RUNNER_TEMP/archive.log"
+
+            exit 1
+          fi
+
+          echo ""
+          echo "========================================"
+          echo "ARCHIVE SUCCEEDED"
+          echo "========================================"
 
       # =========================================================
       # 14. VERIFY ARCHIVE
@@ -932,6 +979,21 @@ jobs:
           ls -lah "$RUNNER_TEMP/VYRO.xcarchive"
 
       # =========================================================
+      # 14b. UPLOAD THE FULL XCODEBUILD LOG
+      #
+      # GitHub only surfaces the tail of a build log on failure and the
+      # 'Disabling previews' notes dominate it. Keeping the complete log
+      # as an artifact means the real error is never lost to truncation.
+      # =========================================================
+      - name: Upload xcodebuild logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-logs
+          path: ${{ runner.temp }}/*.log
+          if-no-files-found: warn
+
+      # =========================================================
       # 15. EXPORT IPA
       # =========================================================
       - name: Export IPA
@@ -944,11 +1006,35 @@ jobs:
           echo "EXPORTING IPA"
           echo "========================================"
 
+          set +e
           xcodebuild \
             -exportArchive \
             -archivePath "$RUNNER_TEMP/VYRO.xcarchive" \
             -exportOptionsPlist ios/ExportOptions.plist \
-            -exportPath "$RUNNER_TEMP/export"
+            -exportPath "$RUNNER_TEMP/export" 2>&1 \
+            | tee "$RUNNER_TEMP/export.log"
+          EXPORT_STATUS=${PIPESTATUS[0]}
+          set -e
+
+          echo ""
+          echo "xcodebuild export exit status: $EXPORT_STATUS"
+
+          if [ "$EXPORT_STATUS" -ne 0 ]; then
+            echo ""
+            echo "========================================"
+            echo "EXPORT FAILED - ERROR LINES"
+            echo "========================================"
+            grep -nE "error:|error: |fatal error:|does not support provisioning|No profiles for|No signing certificate|Code Signing Error|Export failed|unable to" \
+              "$RUNNER_TEMP/export.log" \
+              || echo "  (no line matched the error patterns)"
+            echo ""
+            echo "Full export log tail:"
+            tail -n 40 "$RUNNER_TEMP/export.log"
+            echo ""
+            echo "ExportOptions.plist in use:"
+            cat ios/ExportOptions.plist
+            exit 1
+          fi
 
           echo ""
           echo "Exported files:"
