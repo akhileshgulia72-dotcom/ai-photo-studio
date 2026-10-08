@@ -2,10 +2,6 @@ name: iOS Release
 
 # Builds VYRO for iOS and, when signing credentials are present, archives and
 # uploads the build to TestFlight.
-#
-# When signing secrets are absent the workflow still compiles the release build
-# and uploads the unsigned .app, so pull requests stay meaningful before the
-# Apple account is wired up.
 
 on:
   push:
@@ -47,6 +43,7 @@ jobs:
       FLUTTER_BUILD_NUMBER: ${{ github.run_number }}
 
     steps:
+
       # ------------------------------------------------------------ checkout
       - name: Checkout
         uses: actions/checkout@v4
@@ -108,9 +105,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Signing is all-or-nothing.
-          # Missing secrets disable the signed path.
-          # A partial configuration is an error.
           signing=0
 
           if [ -n "${CERT:-}" ] \
@@ -163,8 +157,6 @@ jobs:
 
           echo "GADApplicationIdentifier = ${GAD_ID}"
 
-          # VYRO iOS AdMob application ID must use this publisher ID.
-          # Reject anything else.
           case "$GAD_ID" in
             ca-app-pub-7694497723149363~*)
               ;;
@@ -174,8 +166,6 @@ jobs:
               ;;
           esac
 
-          # Extra protection against accidentally putting Android AdMob ID
-          # into the iOS Info.plist.
           if [ "$GAD_ID" = "ca-app-pub-7694497723149363~1446706318" ]; then
             echo "::error::Info.plist is using the Android AdMob application id on iOS."
             exit 1
@@ -206,24 +196,18 @@ jobs:
             ios/Runner/GoogleService-Info.plist)"
 
       # ------------------------------------------------------------ validation
-      #
-      # IMPORTANT:
-      # Do not run standalone `flutter test` / `flutter analyze` here.
-      #
-      # GitHub's macOS environment was analyzing generated Firebase Storage
-      # macOS package test sources under:
-      #
-      # build/macos/SourcePackages/firebase_storage-13.6.0/test/
-      #
-      # Those dependency test files reference mockito APIs that are not part
-      # of VYRO's application code.
-      #
-      # Local `flutter analyze` passes successfully.
-      #
-      # The authoritative validation for this release workflow is the actual
-      # iOS release build below.
+
+      - name: Validate Flutter project
+        run: |
+          set -euo pipefail
+
+          test -f ios/Runner.xcodeproj/project.pbxproj
+          test -f ios/ExportOptions.plist
+
+          echo "iOS project files verified."
 
       # ------------------------------------------------------------ code sign
+
       - name: Import signing certificate and provisioning profile
         if: steps.preflight.outputs.signing == '1'
         env:
@@ -237,6 +221,7 @@ jobs:
 
           CERT_PATH="$RUNNER_TEMP/distribution.p12"
           PROFILE_PATH="$RUNNER_TEMP/profile.mobileprovision"
+          PROFILE_PLIST="$RUNNER_TEMP/profile.plist"
           KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
 
           echo "$CERT_B64" | base64 --decode > "$CERT_PATH"
@@ -272,15 +257,70 @@ jobs:
           cp "$PROFILE_PATH" \
             ~/Library/MobileDevice/Provisioning\ Profiles/
 
+          # ---------------------------------------------------------
+          # IMPORTANT:
+          # Read the actual UUID and name from the provisioning profile.
+          # This prevents Xcode from falling back to Development signing.
+          # ---------------------------------------------------------
+
+          security cms \
+            -D \
+            -i "$PROFILE_PATH" \
+            > "$PROFILE_PLIST"
+
+          PROFILE_UUID=$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :UUID' \
+              "$PROFILE_PLIST"
+          )
+
+          PROFILE_NAME=$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :Name' \
+              "$PROFILE_PLIST"
+          )
+
+          PROFILE_APP_ID=$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :Entitlements:application-identifier' \
+              "$PROFILE_PLIST"
+          )
+
+          echo "Provisioning profile:"
+          echo "  Name: $PROFILE_NAME"
+          echo "  UUID: $PROFILE_UUID"
+          echo "  App ID: $PROFILE_APP_ID"
+
+          if [ -z "$PROFILE_UUID" ]; then
+            echo "::error::Could not extract provisioning profile UUID."
+            exit 1
+          fi
+
+          if [ -z "$PROFILE_NAME" ]; then
+            echo "::error::Could not extract provisioning profile name."
+            exit 1
+          fi
+
+          if [[ "$PROFILE_APP_ID" != *"${BUNDLE_ID}" ]]; then
+            echo "::error::Provisioning profile does not match bundle ID ${BUNDLE_ID}."
+            echo "Profile application identifier: ${PROFILE_APP_ID}"
+            exit 1
+          fi
+
+          echo "IOS_PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
+          echo "IOS_PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
+
           # Make temporary keychain visible to codesign.
           security list-keychains \
             -d user \
             -s "$KEYCHAIN_PATH" \
             $(security list-keychains -d user | tr -d '"')
 
-          echo "Installed the distribution certificate and provisioning profile."
+          echo "Installed distribution certificate and provisioning profile."
+          echo "Distribution profile UUID: $PROFILE_UUID"
 
       # ------------------------------------------------------------ CocoaPods
+
       - name: Install CocoaPods dependencies
         run: |
           set -euo pipefail
@@ -296,7 +336,74 @@ jobs:
           pod repo update
           pod install
 
+      # ------------------------------------------------------ FORCE SIGNING
+
+      - name: Configure manual App Store distribution signing
+        if: steps.preflight.outputs.signing == '1'
+        run: |
+          set -euo pipefail
+
+          if [ -z "${IOS_PROFILE_UUID:-}" ]; then
+            echo "::error::IOS_PROFILE_UUID was not created."
+            exit 1
+          fi
+
+          echo "Configuring Release signing..."
+
+          PBX="ios/Runner.xcodeproj/project.pbxproj"
+
+          test -f "$PBX"
+
+          # Remove any old automatic/manual signing values that may conflict.
+          sed -i '' '/CODE_SIGN_STYLE = Automatic;/d' "$PBX"
+          sed -i '' '/CODE_SIGN_IDENTITY = "Apple Distribution";/d' "$PBX"
+          sed -i '' '/CODE_SIGN_IDENTITY\[sdk=iphoneos\*\] = "Apple Distribution";/d' "$PBX"
+
+          # Ensure Release uses Manual signing.
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("ios/Runner.xcodeproj/project.pbxproj")
+          text = path.read_text()
+
+          # Runner target Release configuration.
+          marker = "97C147071C2B0E2C0075B9A6 /* Release */ = {"
+          start = text.find(marker)
+
+          if start == -1:
+              raise SystemExit("Could not find Runner Release build configuration.")
+
+          end = text.find("\n\t\t\t};", start)
+
+          if end == -1:
+              raise SystemExit("Could not determine Runner Release build configuration block.")
+
+          block = text[start:end]
+
+          additions = """
+\t\t\t\tCODE_SIGN_STYLE = Manual;
+\t\t\t\tCODE_SIGN_IDENTITY = "Apple Distribution";
+\t\t\t\tDEVELOPMENT_TEAM = PR4R9GAHZ3;
+\t\t\t\tPROVISIONING_PROFILE = "$(IOS_PROFILE_UUID)";
+"""
+
+          if "CODE_SIGN_STYLE = Manual;" not in block:
+              block += additions
+
+          text = text[:start] + block + text[end:]
+
+          path.write_text(text)
+
+          print("Release signing configuration updated.")
+          PY
+
+          echo "Signing settings:"
+          grep -n \
+            -E 'CODE_SIGN_STYLE|CODE_SIGN_IDENTITY|DEVELOPMENT_TEAM|PROVISIONING_PROFILE' \
+            "$PBX" || true
+
       # ---------------------------------------------------------------- build
+
       - name: Build iOS release (unsigned)
         if: steps.preflight.outputs.signing != '1'
         run: |
@@ -314,6 +421,12 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "Building signed distribution IPA."
+          echo "Bundle ID: ${BUNDLE_ID}"
+          echo "Team: PR4R9GAHZ3"
+          echo "Profile UUID: ${IOS_PROFILE_UUID}"
+          echo "Profile Name: ${IOS_PROFILE_NAME}"
+
           flutter build ipa \
             --release \
             --build-name="${FLUTTER_BUILD_NAME}" \
@@ -322,6 +435,7 @@ jobs:
             --export-options-plist=ios/ExportOptions.plist
 
       # ------------------------------------------------------ backend protection
+
       - name: Confirm the production backend is baked in
         run: |
           set -euo pipefail
@@ -348,6 +462,7 @@ jobs:
           echo "Backend URL check passed."
 
       # ------------------------------------------------------------- artefacts
+
       - name: Upload the unsigned .app
         if: steps.preflight.outputs.signing != '1'
         uses: actions/upload-artifact@v4
@@ -365,6 +480,7 @@ jobs:
           if-no-files-found: error
 
       # ------------------------------------------------------------- TestFlight
+
       - name: Upload to TestFlight
         if: |
           steps.preflight.outputs.can_upload == '1' &&
@@ -403,6 +519,7 @@ jobs:
           echo "Uploaded to App Store Connect. Processing usually takes 5-15 minutes."
 
       # ------------------------------------------------------------- cleanup
+
       - name: Clean up the temporary keychain
         if: always() && steps.preflight.outputs.signing == '1'
         run: |
