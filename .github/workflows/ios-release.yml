@@ -382,9 +382,25 @@ jobs:
           pod install --repo-update
 
       # =========================================================
-      # 9. FIX TEAM ID IN PROJECT
+      # 9. SCOPE SIGNING TO THE RUNNER APP TARGET
+      #
+      # Signing is applied ONLY to the three Runner app
+      # XCBuildConfiguration blocks (Debug / Profile / Release).
+      # It is deliberately NOT applied to:
+      #   - the RunnerTests target
+      #   - the project-level configurations
+      #   - any CocoaPods target
+      # and it is NOT passed to xcodebuild as a command-line
+      # setting, because global settings propagate to every target
+      # in the workspace and break signing on Pods-Runner,
+      # Firebase, gRPC, GoogleUtilities, Promises and friends with:
+      #   "does not support provisioning profiles, but provisioning
+      #    profile ... has been manually specified"
+      #
+      # Blocks are located by their exact IDs and closed by brace
+      # counting, so no regex can mis-detect the end of a block.
       # =========================================================
-      - name: Fix Apple Team ID
+      - name: Configure Runner target signing
         run: |
           set -euo pipefail
 
@@ -395,227 +411,213 @@ jobs:
             exit 1
           fi
 
-          python3 - "$PBXPROJ" <<'PY'
-          import sys
-          from pathlib import Path
-
-          path = Path(sys.argv[1])
-
-          text = path.read_text()
-
-          # Fix previous typo.
-          text = text.replace(
-              "PR4R9GAHZ3",
-              "PR4R9G4HZ3"
-          )
-
-          path.write_text(text)
-
-          print("Team ID normalized to PR4R9G4HZ3.")
-          PY
-
-          if grep -q "PR4R9GAHZ3" "$PBXPROJ"; then
-            echo "ERROR: Old Team ID still exists."
-            exit 1
-          fi
-
-          if ! grep -q "PR4R9G4HZ3" "$PBXPROJ"; then
-            echo "ERROR: Correct Team ID not found."
-            exit 1
-          fi
-
-          echo "Team ID verification passed."
-
-      # =========================================================
-      # 10. CONFIGURE RUNNER RELEASE SIGNING
-      # =========================================================
-      - name: Configure Runner Release signing
-        run: |
-          set -euo pipefail
-
-          PBXPROJ="ios/Runner.xcodeproj/project.pbxproj"
-
-          RUNNER_TARGET_ID="97C146ED1CF9000F007C117D"
-          RUNNER_CONFIG_LIST_ID="97C147051CF9000F007C117D"
-          RUNNER_RELEASE_ID="97C147071CF9000F007C117D"
+          cp "$PBXPROJ" "$RUNNER_TEMP/project.pbxproj.before"
 
           echo "========================================"
-          echo "RUNNER SIGNING CONFIGURATION"
+          echo "SCOPING SIGNING TO THE RUNNER TARGET"
           echo "========================================"
-          echo "Runner target:      $RUNNER_TARGET_ID"
-          echo "Configuration list: $RUNNER_CONFIG_LIST_ID"
-          echo "Release config:     $RUNNER_RELEASE_ID"
-          echo "Team ID:             $TEAM_ID"
-          echo "Bundle ID:           $BUNDLE_ID"
-          echo "Profile UUID:        $IOS_PROFILE_UUID"
+          echo "Team ID:      $TEAM_ID"
+          echo "Bundle ID:    $BUNDLE_ID"
+          echo "Profile UUID: $IOS_PROFILE_UUID"
+          echo "Identity:     Apple Distribution"
           echo "========================================"
 
           python3 - \
             "$PBXPROJ" \
-            "$RUNNER_RELEASE_ID" \
             "$TEAM_ID" \
             "$IOS_PROFILE_UUID" \
             "$BUNDLE_ID" <<'PY'
-
-          import sys
           import re
+          import sys
           from pathlib import Path
 
           path = Path(sys.argv[1])
-          release_id = sys.argv[2]
-          team_id = sys.argv[3]
-          profile_uuid = sys.argv[4]
-          bundle_id = sys.argv[5]
+          team_id, profile_uuid, bundle_id = sys.argv[2], sys.argv[3], sys.argv[4]
 
           text = path.read_text()
 
-          marker = f"{release_id} /* Release */ = {{"
-
-          start = text.find(marker)
-
-          if start == -1:
-              raise SystemExit(
-                  f"ERROR: Release configuration {release_id} not found."
-              )
-
-          end = text.find(
-              "\n\t\t};\n",
-              start
-          )
-
-          if end == -1:
-              raise SystemExit(
-                  "ERROR: Could not find end of Runner Release block."
-              )
-
-          end += len("\n\t\t};\n")
-
-          block = text[start:end]
-
-          # Remove existing signing values.
-          patterns = [
-              r'^\s*CODE_SIGN_STYLE\s*=\s*[^;]+;\s*\n?',
-              r'^\s*CODE_SIGN_IDENTITY(?:\[sdk=iphoneos\*\])?\s*=\s*[^;]+;\s*\n?',
-              r'^\s*DEVELOPMENT_TEAM\s*=\s*[^;]+;\s*\n?',
-              r'^\s*PROVISIONING_PROFILE_SPECIFIER\s*=\s*[^;]+;\s*\n?',
-              r'^\s*PROVISIONING_PROFILE\s*=\s*[^;]+;\s*\n?',
+          # The three Runner *app* build configurations.
+          RUNNER_CONFIG_IDS = [
+              "97C147061CF9000F007C117D",  # Runner Debug
+              "249021D4217E4FDB00AE95B9",  # Runner Profile
+              "97C147071CF9000F007C117D",  # Runner Release
           ]
 
-          for pattern in patterns:
+          SETTINGS = (
+              "\t\t\t\tCODE_SIGN_STYLE = Manual;\n"
+              '\t\t\t\tCODE_SIGN_IDENTITY = "Apple Distribution";\n'
+              f"\t\t\t\tDEVELOPMENT_TEAM = {team_id};\n"
+              f'\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = "{profile_uuid}";\n'
+          )
+
+          REMOVE = re.compile(
+              r"^\s*(CODE_SIGN_STYLE|CODE_SIGN_IDENTITY"
+              r"(?:\[sdk=iphoneos\*\])?|DEVELOPMENT_TEAM"
+              r"|PROVISIONING_PROFILE_SPECIFIER|PROVISIONING_PROFILE)"
+              r"\s*=\s*[^;]+;\s*\n",
+              re.MULTILINE,
+          )
+
+          def block_span(source, config_id):
+              """Return (start, end) of one XCBuildConfiguration block."""
+              m = re.search(
+                  rf"^\t\t{re.escape(config_id)} /\* [^*]+ \*/ = \{{\n",
+                  source,
+                  re.MULTILINE,
+              )
+              if not m:
+                  return None
+              i = m.end()
+              depth = 1
+              while i < len(source) and depth:
+                  ch = source[i]
+                  if ch == "{":
+                      depth += 1
+                  elif ch == "}":
+                      depth -= 1
+                  i += 1
+              return (m.start(), i) if not depth else None
+
+          for config_id in RUNNER_CONFIG_IDS:
+              span = block_span(text, config_id)
+              if span is None:
+                  raise SystemExit(
+                      f"ERROR: Runner configuration {config_id} not found."
+                  )
+
+              start, end = span
+              block = text[start:end]
+
+              # Strip any conflicting existing signing keys.
+              block = REMOVE.sub("", block)
+
+              # Insert scoped signing right after buildSettings = {
+              anchor = "\t\t\tbuildSettings = {\n"
+              pos = block.find(anchor)
+              if pos == -1:
+                  raise SystemExit(
+                      f"ERROR: buildSettings missing in {config_id}."
+                  )
+              insert = pos + len(anchor)
+              block = block[:insert] + SETTINGS + block[insert:]
+
+              # Normalise the app bundle identifier.
               block = re.sub(
-                  pattern,
-                  "",
+                  r"^\s*PRODUCT_BUNDLE_IDENTIFIER\s*=\s*[^;]+;",
+                  f"\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = {bundle_id};",
                   block,
-                  flags=re.MULTILINE
+                  flags=re.MULTILINE,
               )
 
-          settings_marker = "\t\tbuildSettings = {\n"
+              text = text[:start] + block + text[end:]
+              print(f"  scoped signing applied to {config_id}")
 
-          settings_pos = block.find(settings_marker)
+          # Belt and braces: the misspelled Team ID must not survive anywhere.
+          text = text.replace("PR4R9GAHZ3", team_id)
 
-          if settings_pos == -1:
-              raise SystemExit(
-                  "ERROR: buildSettings block not found."
-              )
-
-          insert_pos = settings_pos + len(settings_marker)
-
-          signing = (
-              "\t\t\tCODE_SIGN_STYLE = Manual;\n"
-              '\t\t\tCODE_SIGN_IDENTITY = "Apple Distribution";\n'
-              f"\t\t\tDEVELOPMENT_TEAM = {team_id};\n"
-              f'\t\t\tPROVISIONING_PROFILE_SPECIFIER = "{profile_uuid}";\n'
-          )
-
-          block = (
-              block[:insert_pos]
-              + signing
-              + block[insert_pos:]
-          )
-
-          # Ensure Bundle ID.
-          block = re.sub(
-              r'^\s*PRODUCT_BUNDLE_IDENTIFIER\s*=\s*[^;]+;',
-              f'\t\t\tPRODUCT_BUNDLE_IDENTIFIER = {bundle_id};',
-              block,
-              flags=re.MULTILINE
-          )
-
-          text = (
-              text[:start]
-              + block
-              + text[end:]
-          )
+          if "PR4R9GAHZ3" in text:
+              raise SystemExit("ERROR: misspelled Team ID still present.")
+          if team_id not in text:
+              raise SystemExit("ERROR: correct Team ID not written.")
 
           path.write_text(text)
-
-          print("Runner Release signing configured successfully.")
+          print("Runner signing scope configured.")
           PY
 
-      # =========================================================
-      # 11. VERIFY RUNNER SIGNING
-      # =========================================================
-      - name: Verify Runner signing configuration
-        run: |
-          set -euo pipefail
+          # -----------------------------------------------------
+          # Verify: Runner is manual, tests and Pods untouched
+          # -----------------------------------------------------
 
-          PBXPROJ="ios/Runner.xcodeproj/project.pbxproj"
-
-          python3 - "$PBXPROJ" <<'PY'
+          python3 - "$PBXPROJ" "$TEAM_ID" "$IOS_PROFILE_UUID" "$BUNDLE_ID" <<'PY'
+          import re
           import sys
           from pathlib import Path
 
-          path = Path(sys.argv[1])
-          text = path.read_text()
+          text = Path(sys.argv[1]).read_text()
+          team_id, profile_uuid, bundle_id = sys.argv[2], sys.argv[3], sys.argv[4]
 
-          release_id = "97C147071CF9000F007C117D"
-
-          marker = f"{release_id} /* Release */ = {{"
-
-          start = text.find(marker)
-
-          if start == -1:
-              raise SystemExit(
-                  "ERROR: Runner Release configuration not found."
-              )
-
-          end = text.find("\n\t\t};\n", start)
-
-          if end == -1:
-              raise SystemExit(
-                  "ERROR: Runner Release block invalid."
-              )
-
-          block = text[start:end]
-
-          required = [
-              "CODE_SIGN_STYLE = Manual;",
-              'CODE_SIGN_IDENTITY = "Apple Distribution";',
-              "DEVELOPMENT_TEAM = PR4R9G4HZ3;",
-              'PROVISIONING_PROFILE_SPECIFIER = "4ed3491e-53d9-4e60-a4ca-fc4d247eb428";',
-              "PRODUCT_BUNDLE_IDENTIFIER = com.agdevelops.ainotescanner;",
+          RUNNER_CONFIG_IDS = [
+              "97C147061CF9000F007C117D",
+              "249021D4217E4FDB00AE95B9",
+              "97C147071CF9000F007C117D",
           ]
 
-          for setting in required:
-              if setting not in block:
-                  raise SystemExit(
-                      "ERROR: Missing setting:\n" + setting
-                  )
+          REQUIRED = [
+              "CODE_SIGN_STYLE = Manual;",
+              'CODE_SIGN_IDENTITY = "Apple Distribution";',
+              f"DEVELOPMENT_TEAM = {team_id};",
+              f'PROVISIONING_PROFILE_SPECIFIER = "{profile_uuid}";',
+              f"PRODUCT_BUNDLE_IDENTIFIER = {bundle_id};",
+          ]
+
+          def block_span(source, config_id):
+              m = re.search(
+                  rf"^\t\t{re.escape(config_id)} /\* [^*]+ \*/ = \{{\n",
+                  source,
+                  re.MULTILINE,
+              )
+              if not m:
+                  return None
+              i = m.end()
+              depth = 1
+              while i < len(source) and depth:
+                  if source[i] == "{":
+                      depth += 1
+                  elif source[i] == "}":
+                      depth -= 1
+                  i += 1
+              return (m.start(), i) if not depth else None
+
+          for config_id in RUNNER_CONFIG_IDS:
+              span = block_span(text, config_id)
+              if span is None:
+                  raise SystemExit(f"ERROR: {config_id} not found.")
+              block = text[span[0]:span[1]]
+              for setting in REQUIRED:
+                  if setting not in block:
+                      raise SystemExit(
+                          f"ERROR: {config_id} missing: {setting}"
+                      )
+
+          # RunnerTests must NOT carry the app provisioning profile.
+          tests_span = block_span(text, "331C8088294A63A400263BE5")
+          if tests_span and profile_uuid in text[tests_span[0]:tests_span[1]]:
+              raise SystemExit(
+                  "ERROR: RunnerTests picked up the app provisioning profile."
+              )
 
           print("")
           print("========================================")
           print("RUNNER SIGNING VERIFIED")
           print("========================================")
-          print("Team ID: PR4R9G4HZ3")
-          print("Bundle ID: com.agdevelops.ainotescanner")
-          print("Profile: 4ed3491e-53d9-4e60-a4ca-fc4d247eb428")
-          print("Identity: Apple Distribution")
-          print("Signing: Manual")
+          print(f"Team ID:   {team_id}")
+          print(f"Bundle ID: {bundle_id}")
+          print(f"Profile:   {profile_uuid}")
+          print("Identity:  Apple Distribution")
+          print("Style:     Manual (Runner app target only)")
+          print("Tests:     untouched (no app profile)")
+          print("Pods:      untouched (automatic signing)")
           print("========================================")
           PY
 
+          echo ""
+          echo "Project diff for review:"
+          diff -u "$RUNNER_TEMP/project.pbxproj.before" "$PBXPROJ" || true
+
+
       # =========================================================
       # 12. ARCHIVE
+      #
+      # Signing is NOT passed as xcodebuild command-line arguments.
+      # Global command-line build settings (DEVELOPMENT_TEAM,
+      # CODE_SIGN_STYLE, CODE_SIGN_IDENTITY,
+      # PROVISIONING_PROFILE_SPECIFIER) propagate to every target in the
+      # workspace, including Pods-Runner, Firebase, gRPC, GoogleUtilities
+      # and the rest, which produces:
+      #   "does not support provisioning profiles, but provisioning
+      #    profile ... has been manually specified"
+      # Step 10 scopes those settings to the Runner Release
+      # configuration only, and the Pods keep automatic signing.
       # =========================================================
       - name: Archive VYRO
         run: |
@@ -630,17 +632,47 @@ jobs:
             -p "$KEYCHAIN_PASSWORD" \
             "$KEYCHAIN_PATH"
 
+          # Confirm the scoped signing settings are in place before the
+          # long build, so a config problem fails in seconds not minutes.
+          echo ""
+          echo "Runner Release signing settings:"
+          python3 - ios/Runner.xcodeproj/project.pbxproj <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          text = Path(sys.argv[1]).read_text()
+          start = text.find("97C147071CF9000F007C117D /* Release */ = {")
+          end = text.find("\n\t\t};\n", start)
+          block = text[start:end]
+
+          for key in (
+              "CODE_SIGN_STYLE",
+              "CODE_SIGN_IDENTITY",
+              "DEVELOPMENT_TEAM",
+              "PROVISIONING_PROFILE_SPECIFIER",
+              "PRODUCT_BUNDLE_IDENTIFIER",
+          ):
+              found = re.search(rf"^\s*{key}\s*=\s*(.+?);\s*$", block, re.M)
+              if not found:
+                  raise SystemExit(f"ERROR: {key} missing from Runner Release.")
+              print(f"  {key} = {found.group(1)}")
+
+          if "PR4R9GAHZ3" in block:
+              raise SystemExit(
+                  "ERROR: typo Team ID PR4R9GAHZ3 is still present."
+              )
+          PY
+
+          echo ""
+          echo "Archiving (signing comes from the project, not the CLI)..."
+
           xcodebuild \
             -workspace ios/Runner.xcworkspace \
             -scheme Runner \
             -configuration Release \
             -sdk iphoneos \
             -archivePath "$RUNNER_TEMP/VYRO.xcarchive" \
-            DEVELOPMENT_TEAM="$TEAM_ID" \
-            CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_IDENTITY="Apple Distribution" \
-            PROVISIONING_PROFILE_SPECIFIER="$IOS_PROFILE_UUID" \
-            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
             archive
 
       # =========================================================
@@ -710,7 +742,7 @@ jobs:
           cp "$IPA" "$RUNNER_TEMP/VYRO.ipa"
 
       # =========================================================
-      # 16. UPLOAD IPA
+      # 16. UPLOAD IPA ARTIFACT
       # =========================================================
       - name: Upload IPA
         uses: actions/upload-artifact@v4
@@ -728,3 +760,138 @@ jobs:
           name: VYRO-XCArchive
           path: ${{ runner.temp }}/VYRO.xcarchive
           if-no-files-found: error
+
+      # =========================================================
+      # 18. UPLOAD TO APP STORE CONNECT / TESTFLIGHT
+      #
+      # Authenticates with an App Store Connect API key. The three
+      # secrets below are read from the environment, never printed
+      # and never written to the repository.
+      # =========================================================
+      - name: Upload to App Store Connect (TestFlight)
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "UPLOAD TO APP STORE CONNECT"
+          echo "========================================"
+
+          if [ -z "${ASC_KEY_ID:-}" ]; then
+            echo "ERROR: APP_STORE_CONNECT_KEY_ID is not set."
+            exit 1
+          fi
+
+          if [ -z "${ASC_ISSUER_ID:-}" ]; then
+            echo "ERROR: APP_STORE_CONNECT_ISSUER_ID is not set."
+            exit 1
+          fi
+
+          if [ -z "${ASC_PRIVATE_KEY:-}" ]; then
+            echo "ERROR: APP_STORE_CONNECT_PRIVATE_KEY is not set."
+            exit 1
+          fi
+
+          IPA="$RUNNER_TEMP/VYRO.ipa"
+
+          if [ ! -f "$IPA" ]; then
+            echo "ERROR: $IPA not found."
+            exit 1
+          fi
+
+          echo "IPA:        $IPA"
+          echo "IPA size:   $(du -h "$IPA" | cut -f1)"
+          echo "Key ID:     $ASC_KEY_ID"
+          echo "Issuer ID:  ${ASC_ISSUER_ID:0:8}... (truncated)"
+
+          # -----------------------------------------------------
+          # Write the API key outside the repository
+          # -----------------------------------------------------
+          #
+          # altool looks for AuthKey_<KEYID>.p8 in one of:
+          #   ./private_keys
+          #   ~/private_keys
+          #   ~/.private_keys
+          #   ~/.appstoreconnect/private_keys
+          # A random working directory avoids the repository entirely.
+
+          KEY_DIR="$RUNNER_TEMP/asc-keys"
+          mkdir -p "$KEY_DIR/private_keys"
+
+          printf '%s\n' "$ASC_PRIVATE_KEY" \
+            > "$KEY_DIR/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+
+          chmod 600 "$KEY_DIR/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+
+          if [ ! -s "$KEY_DIR/private_keys/AuthKey_${ASC_KEY_ID}.p8" ]; then
+            echo "ERROR: Failed to write the API private key."
+            exit 1
+          fi
+
+          # -----------------------------------------------------
+          # Confirm the key is a real .p8 before uploading
+          # -----------------------------------------------------
+
+          if ! grep -q "BEGIN PRIVATE KEY" \
+            "$KEY_DIR/private_keys/AuthKey_${ASC_KEY_ID}.p8"; then
+            echo "ERROR: APP_STORE_CONNECT_PRIVATE_KEY does not look like a"
+            echo ".p8 private key. It must include the"
+            echo "'-----BEGIN PRIVATE KEY-----' and"
+            echo "'-----END PRIVATE KEY-----' lines."
+            exit 1
+          fi
+
+          echo "API key written and validated."
+
+          # Show the private key to ssh-agent/altool only from the temp dir.
+          cd "$KEY_DIR"
+
+          # -----------------------------------------------------
+          # Upload
+          # -----------------------------------------------------
+
+          echo ""
+          echo "Uploading IPA to App Store Connect..."
+          echo "(Processing on App Store Connect can take 5-15 minutes.)"
+          echo ""
+
+          xcrun altool \
+            --upload-app \
+            -f "$IPA" \
+            -t ios \
+            --apiKey "$ASC_KEY_ID" \
+            --apiIssuer "$ASC_ISSUER_ID" \
+            --verbose
+
+          echo ""
+          echo "========================================"
+          echo "UPLOAD SUCCEEDED"
+          echo "========================================"
+          echo "The build has been delivered to App Store Connect."
+          echo "It will appear under TestFlight once processing completes."
+          echo "========================================"
+
+      # =========================================================
+      # 19. CLEAN UP SIGNING MATERIAL
+      # =========================================================
+      - name: Clean up signing keychain and credentials
+        if: always()
+        run: |
+          set -uo pipefail
+
+          echo "Removing temporary signing material..."
+
+          if [ -n "${KEYCHAIN_PATH:-}" ] && [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+            echo "Deleted keychain: $KEYCHAIN_PATH"
+          fi
+
+          rm -f "$RUNNER_TEMP/apple_distribution.p12" || true
+          rm -f "$RUNNER_TEMP/vyro.mobileprovision" || true
+          rm -f "$RUNNER_TEMP/profile.plist" || true
+          rm -rf "$RUNNER_TEMP/asc-keys" || true
+
+          echo "Temporary signing material removed."
