@@ -59,7 +59,7 @@ class DefaultFirebaseOptions {
   );
   static const FirebaseOptions ios = FirebaseOptions(
     apiKey: 'AIzaSyBbpODmyacHt9OCNEGzZU76acg0Y-T4tYQ',
-    appId: '1:516306315147:ios:271013ffab422be342318e',
+    appId: '1:516306315147:ios:85497aaaa7f292f242318e',
     messagingSenderId: '516306315147',
     projectId: 'ai-note-scanner',
     storageBucket: 'ai-note-scanner.firebasestorage.app',
@@ -67,7 +67,7 @@ class DefaultFirebaseOptions {
   );
   static const FirebaseOptions macos = FirebaseOptions(
     apiKey: 'AIzaSyBbpODmyacHt9OCNEGzZU76acg0Y-T4tYQ',
-    appId: '1:516306315147:ios:271013ffab422be342318e',
+    appId: '1:516306315147:ios:85497aaaa7f292f242318e',
     messagingSenderId: '516306315147',
     projectId: 'ai-note-scanner',
     storageBucket: 'ai-note-scanner.firebasestorage.app',

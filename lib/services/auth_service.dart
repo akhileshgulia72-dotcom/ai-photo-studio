@@ -1,4 +1,5 @@
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
 /// Central authentication service for VYRO.
@@ -18,6 +19,13 @@ class AuthService {
   Future<void> initialize() async {
     if (_initialized) return;
 
+    // No client id is passed: on iOS `google_sign_in` reads CLIENT_ID and
+    // REVERSED_CLIENT_ID from GoogleService-Info.plist, which is now the
+    // single source of truth. The plist and FirebaseOptions must belong to
+    // the same Firebase project or the id token will be rejected when it is
+    // exchanged with Firebase Auth.
+    debugPrint('AuthService: initializing Google Sign-In');
+
     await _googleSignIn.initialize();
     _initialized = true;
   }
@@ -25,6 +33,9 @@ class AuthService {
   User? get currentUser => _firebaseAuth.currentUser;
 
   bool get isGuest => currentUser?.isAnonymous ?? false;
+
+  /// True when this platform can present a Google sign-in flow at all.
+  bool get supportsGoogleSignIn => _googleSignIn.supportsAuthenticate();
 
   Future<User> continueAsGuest() async {
     final existing = currentUser;
@@ -41,6 +52,8 @@ class AuthService {
     if (!_googleSignIn.supportsAuthenticate()) {
       throw StateError('Google Sign-In is not supported on this platform.');
     }
+
+    debugPrint('AuthService: presenting Google Sign-In');
 
     final googleUser = await _googleSignIn.authenticate();
     final googleAuth = googleUser.authentication;

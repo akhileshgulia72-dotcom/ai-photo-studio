@@ -74,7 +74,7 @@ jobs:
           echo "Xcode 26.3 / iOS 26 SDK validation PASSED."
 
       # =========================================================
-      # 2. PREFLIGHT - SECRET VALIDATION
+      # 3. PREFLIGHT - SECRET VALIDATION
       #
       # GitHub substitutes an empty string for a secret it cannot
       # resolve, with no error of its own. This reports every
@@ -154,7 +154,7 @@ jobs:
           echo "All required secrets are present."
 
       # =========================================================
-      # 3. FLUTTER
+      # 4. FLUTTER
       # =========================================================
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -164,7 +164,7 @@ jobs:
           cache: true
 
       # =========================================================
-      # 4. FLUTTER DEPENDENCIES
+      # 5. FLUTTER DEPENDENCIES
       # =========================================================
       - name: Flutter Pub Get
         run: |
@@ -174,7 +174,7 @@ jobs:
           flutter pub get
 
       # =========================================================
-      # 5. INSTALL APPLE DISTRIBUTION CERTIFICATE
+      # 6. INSTALL APPLE DISTRIBUTION CERTIFICATE
       #
       # NOTE: this step intentionally does NOT run
       #   openssl pkcs12 -passin ...
@@ -366,7 +366,7 @@ jobs:
           echo "========================================"
 
       # =========================================================
-      # 6. VERIFY CERTIFICATE
+      # 7. VERIFY CERTIFICATE
       # =========================================================
       - name: Verify Apple Distribution certificate
         run: |
@@ -396,7 +396,7 @@ jobs:
           echo "Apple Distribution certificate found."
 
       # =========================================================
-      # 7. INSTALL PROVISIONING PROFILE
+      # 8. INSTALL PROVISIONING PROFILE
       # =========================================================
       - name: Install provisioning profile
         env:
@@ -490,7 +490,7 @@ jobs:
           echo "Provisioning profile installed successfully."
 
       # =========================================================
-      # 8. FLUTTER CLEAN
+      # 9. FLUTTER CLEAN
       # =========================================================
       - name: Flutter clean
         run: |
@@ -500,7 +500,7 @@ jobs:
           flutter pub get
 
       # =========================================================
-      # 9. VERIFY THE PODS XCCONFIG INCLUDE
+      # 10. VERIFY THE PODS XCCONFIG INCLUDE
       #
       # The Runner target has no baseConfigurationReference set, so the
       # ONLY path by which it inherits the CocoaPods build settings is the
@@ -563,7 +563,7 @@ jobs:
           echo "Pods xcconfig is included by both configurations."
 
       # =========================================================
-      # 10. COCOAPODS
+      # 11. COCOAPODS
       # =========================================================
       - name: Install CocoaPods dependencies
         run: |
@@ -573,100 +573,6 @@ jobs:
 
           pod install --repo-update
 
-      # =========================================================
-      # 11. MATCH THE GENERATED SWIFT PACKAGE TO THE APP DEPLOYMENT TARGET
-      #
-      # Flutter declares its iOS floor as a hard-coded iOS 13.0 in
-      # flutter_tools (darwin.dart: Version(13, 0, null)), so the
-      # generated FlutterGeneratedPluginSwiftPackage/Package.swift
-      # declares:
-      #     platforms: [ .iOS("13.0") ]
-      #
-      # Swift Package Manager then refuses any dependency whose floor is
-      # higher, which breaks the Firebase products that require 15.0:
-      #     "The package product 'firebase-core' requires minimum
-      #      platform version 15.0 for the iOS platform, but this target
-      #      supports 13.0"
-      #
-      # Flutter ships the correct repair as
-      # SwiftPackageManager.updateMinimumDeployment, which raises this
-      # package to the Xcode project's IPHONEOS_DEPLOYMENT_TARGET. It is
-      # guarded by `if (app.project.usesSwiftPackageManager)`
-      # (ios/mac.dart:352), and a stale
-      # swift_package_manager_enabled['ios'] = false in
-      # .flutter-plugins-dependencies means that branch is skipped.
-      #
-      # This applies exactly the bump Flutter would have applied. It is
-      # idempotent, and it fails loudly rather than letting the archive
-      # fail later with less context.
-      # =========================================================
-      - name: Align generated Swift package platform with the app
-        run: |
-          set -euo pipefail
-
-          PBXPROJ="ios/Runner.xcodeproj/project.pbxproj"
-          MANIFEST="ios/Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage/Package.swift"
-
-          echo "========================================"
-          echo "ALIGNING SWIFT PACKAGE PLATFORM"
-          echo "========================================"
-
-          if [ ! -f "$MANIFEST" ]; then
-            echo "ERROR: generated Swift package manifest not found:"
-            echo "  $MANIFEST"
-            echo "It is written by 'flutter pub get'. Ensure that step ran."
-            exit 1
-          fi
-
-          TARGET=$(
-            grep -m1 'IPHONEOS_DEPLOYMENT_TARGET' "$PBXPROJ" \
-              | sed 's/.*= *\([0-9.]*\);.*/\1/'
-          )
-
-          if [ -z "$TARGET" ]; then
-            echo "ERROR: could not read IPHONEOS_DEPLOYMENT_TARGET from the project."
-            exit 1
-          fi
-
-          echo "App iOS deployment target : $TARGET"
-          echo "Manifest before:"
-          sed 's/^/    /' "$MANIFEST"
-
-          python3 - "$MANIFEST" "$TARGET" <<'PY'
-          import re
-          import sys
-          from pathlib import Path
-
-          manifest = Path(sys.argv[1])
-          target = sys.argv[2]
-
-          text = manifest.read_text()
-          updated, count = re.subn(
-              r'\.iOS\("[0-9.]+"\)',
-              '.iOS("' + target + '")',
-              text,
-          )
-
-          if count == 0:
-              raise SystemExit(
-                  'ERROR: no .iOS("...") entry found in the generated manifest.'
-              )
-
-          manifest.write_text(updated)
-          print('Raised ' + str(count) + ' platform entry to iOS ' + target + '.')
-          PY
-
-          echo "Manifest after:"
-          sed 's/^/    /' "$MANIFEST"
-
-          if ! grep -q ".iOS(\"$TARGET\")" "$MANIFEST"; then
-            echo "ERROR: manifest still does not declare iOS $TARGET."
-            exit 1
-          fi
-
-          echo ""
-          echo "Generated Swift package now targets iOS $TARGET."
-      # =========================================================
       # 12. SCOPE SIGNING TO THE RUNNER APP TARGET
       #
       # Signing is applied ONLY to the three Runner app
@@ -971,7 +877,153 @@ jobs:
           echo "========================================"
 
       # =========================================================
-      # 14. ARCHIVE
+      # 14. GENERATE THE DART CONFIGURATION
+      #
+      # This job archives with `xcodebuild` directly, and xcodebuild has no
+      # concept of --dart-define. Flutter instead writes the defines into
+      # Flutter/Generated.xcconfig, and the Xcode build reads DART_DEFINES
+      # from there.
+      #
+      # Without this step every --dart-define is silently ignored and
+      # GENERATION_API_BASE_URL never reaches Dart, so the app falls back to
+      # its compile-time default instead of the production backend.
+      #
+      # --config-only generates the config without running a full build, so
+      # it is cheap. It must run AFTER `pod install` (it regenerates the
+      # xcconfig chain) and BEFORE the archive.
+      #
+      # The Google OAuth client id is NOT passed here: on iOS
+      # `google_sign_in` reads CLIENT_ID and REVERSED_CLIENT_ID from
+      # GoogleService-Info.plist, which is committed and is the single
+      # source of truth.
+      # =========================================================
+      - name: Generate Dart configuration (dart-defines)
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "GENERATING DART CONFIGURATION"
+          echo "========================================"
+          echo ""
+          echo "Backend URL: ${GENERATION_API_BASE_URL}"
+
+          # CFBundleVersion comes from FLUTTER_BUILD_NUMBER, which Flutter
+          # writes into Generated.xcconfig and the Xcode project reads via
+          # CURRENT_PROJECT_VERSION. Passing the workflow run number keeps
+          # every TestFlight upload on a unique, strictly increasing build
+          # number; without it the pubspec value is reused and App Store
+          # Connect rejects the second upload as a duplicate.
+          echo "Build name:  1.0.0 (from pubspec)"
+          echo "Build number: ${GITHUB_RUN_NUMBER}"
+
+          flutter build ios --release --config-only \
+            --build-name=1.0.0 \
+            --build-number="${GITHUB_RUN_NUMBER}" \
+            --dart-define=GENERATION_API_BASE_URL="${GENERATION_API_BASE_URL}"
+
+          echo ""
+          echo "DART_DEFINES written to Generated.xcconfig:"
+          grep -c 'DART_DEFINES' ios/Flutter/Generated.xcconfig || true
+          grep 'DART_DEFINES' ios/Flutter/Generated.xcconfig || true
+
+          echo ""
+          echo "Build number Flutter wrote:"
+          grep -E 'FLUTTER_BUILD_(NAME|NUMBER)' ios/Flutter/Generated.xcconfig || true
+      # =========================================================
+      # 15. MATCH THE GENERATED SWIFT PACKAGE TO THE APP DEPLOYMENT TARGET
+      #
+      # Flutter declares its iOS floor as a hard-coded iOS 13.0 in
+      # flutter_tools (darwin.dart: Version(13, 0, null)), so the
+      # generated FlutterGeneratedPluginSwiftPackage/Package.swift
+      # declares:
+      #     platforms: [ .iOS("13.0") ]
+      #
+      # Swift Package Manager then refuses any dependency whose floor is
+      # higher, which breaks the Firebase products that require 15.0:
+      #     "The package product 'firebase-core' requires minimum
+      #      platform version 15.0 for the iOS platform, but this target
+      #      supports 13.0"
+      #
+      # Flutter ships the correct repair as
+      # SwiftPackageManager.updateMinimumDeployment, which raises this
+      # package to the Xcode project's IPHONEOS_DEPLOYMENT_TARGET. It is
+      # guarded by `if (app.project.usesSwiftPackageManager)`
+      # (ios/mac.dart:352), and a stale
+      # swift_package_manager_enabled['ios'] = false in
+      # .flutter-plugins-dependencies means that branch is skipped.
+      #
+      # This applies exactly the bump Flutter would have applied. It is
+      # idempotent, and it fails loudly rather than letting the archive
+      # fail later with less context.
+      # =========================================================
+      - name: Align generated Swift package platform with the app
+        run: |
+          set -euo pipefail
+
+          PBXPROJ="ios/Runner.xcodeproj/project.pbxproj"
+          MANIFEST="ios/Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage/Package.swift"
+
+          echo "========================================"
+          echo "ALIGNING SWIFT PACKAGE PLATFORM"
+          echo "========================================"
+
+          if [ ! -f "$MANIFEST" ]; then
+            echo "ERROR: generated Swift package manifest not found:"
+            echo "  $MANIFEST"
+            echo "It is written by 'flutter pub get'. Ensure that step ran."
+            exit 1
+          fi
+
+          TARGET=$(
+            grep -m1 'IPHONEOS_DEPLOYMENT_TARGET' "$PBXPROJ" \
+              | sed 's/.*= *\([0-9.]*\);.*/\1/'
+          )
+
+          if [ -z "$TARGET" ]; then
+            echo "ERROR: could not read IPHONEOS_DEPLOYMENT_TARGET from the project."
+            exit 1
+          fi
+
+          echo "App iOS deployment target : $TARGET"
+          echo "Manifest before:"
+          sed 's/^/    /' "$MANIFEST"
+
+          python3 - "$MANIFEST" "$TARGET" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          manifest = Path(sys.argv[1])
+          target = sys.argv[2]
+
+          text = manifest.read_text()
+          updated, count = re.subn(
+              r'\.iOS\("[0-9.]+"\)',
+              '.iOS("' + target + '")',
+              text,
+          )
+
+          if count == 0:
+              raise SystemExit(
+                  'ERROR: no .iOS("...") entry found in the generated manifest.'
+              )
+
+          manifest.write_text(updated)
+          print('Raised ' + str(count) + ' platform entry to iOS ' + target + '.')
+          PY
+
+          echo "Manifest after:"
+          sed 's/^/    /' "$MANIFEST"
+
+          if ! grep -q ".iOS(\"$TARGET\")" "$MANIFEST"; then
+            echo "ERROR: manifest still does not declare iOS $TARGET."
+            exit 1
+          fi
+
+          echo ""
+          echo "Generated Swift package now targets iOS $TARGET."
+      # =========================================================
+      # 16. ARCHIVE
       #
       # Signing is NOT passed as xcodebuild command-line arguments.
       # Global command-line build settings (DEVELOPMENT_TEAM,
@@ -1106,7 +1158,7 @@ jobs:
           echo "========================================"
 
       # =========================================================
-      # 15. VERIFY ARCHIVE
+      # 17. VERIFY ARCHIVE
       # =========================================================
       - name: Verify archive
         run: |
@@ -1124,7 +1176,7 @@ jobs:
           ls -lah "$RUNNER_TEMP/VYRO.xcarchive"
 
       # =========================================================
-      # 14b. UPLOAD THE FULL XCODEBUILD LOG
+      # 18. UPLOAD THE FULL XCODEBUILD LOG
       #
       # GitHub only surfaces the tail of a build log on failure and the
       # 'Disabling previews' notes dominate it. Keeping the complete log
@@ -1139,7 +1191,7 @@ jobs:
           if-no-files-found: warn
 
       # =========================================================
-      # 16. EXPORT IPA
+      # 19. EXPORT IPA
       # =========================================================
       - name: Export IPA
         env:
@@ -1197,7 +1249,7 @@ jobs:
           ls -lah "$RUNNER_TEMP/export"
 
       # =========================================================
-      # 17. VERIFY IPA
+      # 20. VERIFY IPA
       # =========================================================
       - name: Verify IPA
         run: |
@@ -1222,7 +1274,7 @@ jobs:
           cp "$IPA" "$RUNNER_TEMP/VYRO.ipa"
 
       # =========================================================
-      # 18. UPLOAD IPA ARTIFACT
+      # 21. UPLOAD IPA ARTIFACT
       # =========================================================
       - name: Upload IPA
         uses: actions/upload-artifact@v4
@@ -1232,7 +1284,7 @@ jobs:
           if-no-files-found: error
 
       # =========================================================
-      # 19. UPLOAD ARCHIVE
+      # 22. UPLOAD ARCHIVE
       # =========================================================
       - name: Upload XCArchive
         uses: actions/upload-artifact@v4
@@ -1242,7 +1294,7 @@ jobs:
           if-no-files-found: error
 
       # =========================================================
-      # 20. UPLOAD TO APP STORE CONNECT / TESTFLIGHT
+      # 23. UPLOAD TO APP STORE CONNECT / TESTFLIGHT
       #
       # Authenticates with an App Store Connect API key. The three
       # secrets below are read from the environment, never printed
@@ -1355,7 +1407,7 @@ jobs:
           echo "========================================"
 
       # =========================================================
-      # 21. CLEAN UP SIGNING MATERIAL
+      # 24. CLEAN UP SIGNING MATERIAL
       # =========================================================
       - name: Clean up signing keychain and credentials
         if: always()
