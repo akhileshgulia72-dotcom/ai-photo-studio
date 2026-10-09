@@ -26,16 +26,18 @@ The FastAPI backend is in `backend/` and is designed for Cloud Run in the same G
 
 ## Release ad configuration
 
-Debug builds use Google's test ad units. Release builds read the native and interstitial ad unit IDs from build-time defines. Set the IDs created in your AdMob account; the interstitial ID is not currently present in this repository.
+The AdMob app and production ad unit IDs are configured in the repository and
+selected by platform. To exercise Google's official demo ads in a debug build,
+pass `--dart-define=ADMOB_USE_TEST_ADS=true`. The switch is ignored in release
+builds. The iOS demo IDs cover rewarded, interstitial, and native ads.
 
 ```sh
-flutter build appbundle --release \
-  --dart-define=GENERATION_API_BASE_URL=https://vyro-api-jnz6yqjl4a-el.a.run.app \
-  --dart-define=NATIVE_AD_UNIT_ID=ca-app-pub-XXXX/NNNN \
-  --dart-define=INTERSTITIAL_AD_UNIT_ID=ca-app-pub-XXXX/NNNN
+flutter run --debug --dart-define=ADMOB_USE_TEST_ADS=true
 ```
 
-The app skips those ad formats in release when an ID is not supplied. Ad entitlement lookup fails closed, so ads are hidden when the paid plan cannot be verified.
+Ad entitlement lookup fails closed, so ads are hidden when the paid plan cannot
+be verified. Live ad serving also depends on the app's AdMob verification and
+readiness status.
 
 ## iOS
 
@@ -66,5 +68,7 @@ The iOS AdMob app id lives in `Info.plist`; ad unit ids are chosen per platform 
 | Interstitial | `…/7630322351` | `…/8336693504` |
 | Native | `…/6374835026` | `…/7462595539` |
 
-Remaining pre-flight items are the Apple signing credentials, the Firebase iOS app registration, and the App Store Connect in-app purchase products. See [IOS_RELEASE.md](IOS_RELEASE.md) section 7.
+Remaining release items are Apple signing credentials and the App Store Connect
+in-app purchase products. Confirm the Google provider is enabled in Firebase
+Authentication. See [IOS_RELEASE.md](IOS_RELEASE.md) section 7.
 

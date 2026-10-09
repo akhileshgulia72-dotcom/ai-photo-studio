@@ -9,6 +9,7 @@ import 'package:image_picker/image_picker.dart';
 import '../widgets/premium_background.dart';
 import '../services/account_profile_service.dart';
 import '../services/ad_unit_config.dart';
+import '../services/ad_diagnostics.dart';
 import '../services/rewarded_ad_service.dart';
 import '../services/interstitial_ad_service.dart';
 import '../services/gallery_save_service.dart';
@@ -526,10 +527,16 @@ class _ToolNativeAdSlotState extends State<_ToolNativeAdSlot> {
   bool _loaded = false;
   bool _hide = false;
   bool _loading = false;
-  // Native unit comes from AdUnitConfig: one place decides platform and
-  // test/production. It is null when test ads are enabled, because Google
-  // publishes no native test unit, so the slot is skipped rather than
-  // falling back to the production unit.
+  Timer? _retryTimer;
+  int _retryAttempt = 0;
+  int _loadGeneration = 0;
+  static const List<Duration> _retryDelays = <Duration>[
+    Duration(seconds: 2),
+    Duration(seconds: 5),
+    Duration(seconds: 15),
+  ];
+
+  // Platform and test/production selection stay centralized.
   static String? get _unitId => AdUnitConfig.native;
 
   @override
@@ -541,8 +548,12 @@ class _ToolNativeAdSlotState extends State<_ToolNativeAdSlot> {
 
   void _onConsentChanged() {
     if (!UmpConsentService.instance.adsAllowed) {
+      _loadGeneration++;
+      _retryTimer?.cancel();
+      _retryTimer = null;
       _ad?.dispose();
       _ad = null;
+      _loading = false;
       if (mounted) {
         setState(() {
           _loaded = false;
@@ -551,6 +562,7 @@ class _ToolNativeAdSlotState extends State<_ToolNativeAdSlot> {
       }
       return;
     }
+    _retryAttempt = 0;
     if (mounted) setState(() => _hide = false);
     unawaited(_load());
   }
@@ -570,6 +582,7 @@ class _ToolNativeAdSlotState extends State<_ToolNativeAdSlot> {
     }
 
     _loading = true;
+    final generation = ++_loadGeneration;
     try {
       // Wait for consent and SDK init together instead of sampling once.
       if (!await UmpConsentService.instance.waitUntilReady(
@@ -594,7 +607,9 @@ class _ToolNativeAdSlotState extends State<_ToolNativeAdSlot> {
     } finally {
       _loading = false;
     }
-    if (!mounted || !UmpConsentService.instance.adsAllowed) {
+    if (!mounted ||
+        generation != _loadGeneration ||
+        !UmpConsentService.instance.adsAllowed) {
       return;
     }
     _ad = NativeAd(
@@ -607,27 +622,57 @@ class _ToolNativeAdSlotState extends State<_ToolNativeAdSlot> {
       ),
       listener: NativeAdListener(
         onAdLoaded: (ad) {
-          if (!UmpConsentService.instance.adsAllowed) {
+          if (!mounted ||
+              generation != _loadGeneration ||
+              !UmpConsentService.instance.adsAllowed) {
             ad.dispose();
             return;
           }
+          _retryTimer?.cancel();
+          _retryTimer = null;
+          _retryAttempt = 0;
           debugPrint('ToolNativeAdSlot: ad loaded');
+          logAdResponseInfo('ToolNativeAdSlot', ad.responseInfo);
           if (mounted) setState(() => _loaded = true);
         },
         onAdFailedToLoad: (ad, error) {
           ad.dispose();
-          debugPrint(
-            'ToolNativeAdSlot: load FAILED code=${error.code} '
-            'domain=${error.domain} message=${error.message} unit=$id',
+          logAdFailure(
+            'ToolNativeAdSlot load unit=$id',
+            error,
+            responseInfo: error.responseInfo,
           );
+          if (generation == _loadGeneration) {
+            _ad = null;
+            _scheduleRetry();
+          }
         },
       ),
     )..load();
   }
 
+  void _scheduleRetry() {
+    if (!mounted ||
+        !UmpConsentService.instance.adsAllowed ||
+        _retryAttempt >= _retryDelays.length) {
+      return;
+    }
+    final delay = _retryDelays[_retryAttempt++];
+    debugPrint('ToolNativeAdSlot: retry $_retryAttempt in $delay');
+    _retryTimer?.cancel();
+    _retryTimer = Timer(delay, () {
+      _retryTimer = null;
+      if (mounted && UmpConsentService.instance.adsAllowed) {
+        unawaited(_load());
+      }
+    });
+  }
+
   @override
   void dispose() {
     UmpConsentService.instance.removeListener(_onConsentChanged);
+    _loadGeneration++;
+    _retryTimer?.cancel();
     _ad?.dispose();
     super.dispose();
   }

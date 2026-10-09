@@ -13,8 +13,8 @@
           "projectId": "ai-note-scanner",
           "configurations": {
             "android": "1:516306315147:android:83907bfccab36e1442318e",
-            "ios": "1:516306315147:ios:271013ffab422be342318e",
-            "macos": "1:516306315147:ios:271013ffab422be342318e",
+            "ios": "1:516306315147:ios:85497aaaa7f292f242318e",
+            "macos": "1:516306315147:ios:85497aaaa7f292f242318e",
             "web": "1:516306315147:web:80d9b5cdaa88533942318e",
             "windows": "1:516306315147:web:eda6a925809ce76b42318e"
           }

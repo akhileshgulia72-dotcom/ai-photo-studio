@@ -1,6 +1,10 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+
+import '../firebase_options.dart';
+import 'google_sign_in_config.dart';
 
 /// Central authentication service for VYRO.
 ///
@@ -19,15 +23,37 @@ class AuthService {
   Future<void> initialize() async {
     if (_initialized) return;
 
-    // No client id is passed: on iOS `google_sign_in` reads CLIENT_ID and
-    // REVERSED_CLIENT_ID from GoogleService-Info.plist, which is now the
-    // single source of truth. The plist and FirebaseOptions must belong to
-    // the same Firebase project or the id token will be rejected when it is
-    // exchanged with Firebase Auth.
-    debugPrint('AuthService: initializing Google Sign-In');
-
-    await _googleSignIn.initialize();
-    _initialized = true;
+    debugPrint('AuthService: Google Sign-In stage=initialize');
+    try {
+      if (defaultTargetPlatform == TargetPlatform.iOS) {
+        await _googleSignIn.initialize(
+          clientId: DefaultFirebaseOptions.ios.iosClientId,
+          serverClientId: GoogleSignInConfig.serverClientId,
+        );
+      } else {
+        // Keep Android's existing google-services.json based configuration.
+        await _googleSignIn.initialize();
+      }
+      _initialized = true;
+      debugPrint('AuthService: Google Sign-In stage=initialize result=ready');
+    } on GoogleSignInException catch (error) {
+      debugPrint(
+        'AuthService: Google Sign-In stage=initialize '
+        'code=${error.code.name}',
+      );
+      rethrow;
+    } on PlatformException catch (error) {
+      debugPrint(
+        'AuthService: Google Sign-In stage=initialize code=${error.code}',
+      );
+      rethrow;
+    } catch (error) {
+      debugPrint(
+        'AuthService: Google Sign-In stage=initialize '
+        'errorType=${error.runtimeType}',
+      );
+      rethrow;
+    }
   }
 
   User? get currentUser => _firebaseAuth.currentUser;
@@ -47,42 +73,71 @@ class AuthService {
   }
 
   Future<UserCredential> signInWithGoogle() async {
-    await initialize();
+    var stage = 'initialize';
+    try {
+      await initialize();
 
-    if (!_googleSignIn.supportsAuthenticate()) {
-      throw StateError('Google Sign-In is not supported on this platform.');
-    }
-
-    debugPrint('AuthService: presenting Google Sign-In');
-
-    final googleUser = await _googleSignIn.authenticate();
-    final googleAuth = googleUser.authentication;
-
-    final idToken = googleAuth.idToken;
-    if (idToken == null || idToken.isEmpty) {
-      throw StateError('Google Sign-In did not return an ID token.');
-    }
-
-    final credential = GoogleAuthProvider.credential(idToken: idToken);
-    final firebaseUser = _firebaseAuth.currentUser;
-
-    if (firebaseUser != null && firebaseUser.isAnonymous) {
-      try {
-        // Preserve the anonymous Firebase UID whenever possible.
-        return await firebaseUser.linkWithCredential(credential);
-      } on FirebaseAuthException catch (error) {
-        // The Google account may already belong to another Firebase user.
-        // In that case sign into the existing account rather than silently
-        // creating a third account.
-        if (error.code == 'credential-already-in-use' ||
-            error.code == 'provider-already-linked') {
-          return _firebaseAuth.signInWithCredential(credential);
-        }
-        rethrow;
+      stage = 'availability_check';
+      if (!_googleSignIn.supportsAuthenticate()) {
+        throw StateError('Google Sign-In is not supported on this platform.');
       }
-    }
 
-    return _firebaseAuth.signInWithCredential(credential);
+      stage = 'google_authenticate';
+      debugPrint('AuthService: Google Sign-In stage=$stage');
+      final googleUser = await _googleSignIn.authenticate();
+      final googleAuth = googleUser.authentication;
+
+      stage = 'id_token_check';
+      final idToken = googleAuth.idToken;
+      if (idToken == null || idToken.isEmpty) {
+        debugPrint(
+          'AuthService: Google Sign-In stage=$stage code=missing_id_token',
+        );
+        throw StateError('Google Sign-In did not return an ID token.');
+      }
+
+      final credential = GoogleAuthProvider.credential(idToken: idToken);
+      final firebaseUser = _firebaseAuth.currentUser;
+      stage = firebaseUser?.isAnonymous == true
+          ? 'firebase_link_credential'
+          : 'firebase_sign_in_credential';
+
+      if (firebaseUser != null && firebaseUser.isAnonymous) {
+        try {
+          // Preserve the anonymous Firebase UID whenever possible.
+          return await firebaseUser.linkWithCredential(credential);
+        } on FirebaseAuthException catch (error) {
+          // Preserve the prior recovery behavior when Google already belongs
+          // to another Firebase user.
+          if (error.code == 'credential-already-in-use' ||
+              error.code == 'provider-already-linked') {
+            stage = 'firebase_sign_in_existing_credential';
+            return await _firebaseAuth.signInWithCredential(credential);
+          }
+          rethrow;
+        }
+      }
+
+      return await _firebaseAuth.signInWithCredential(credential);
+    } on GoogleSignInException catch (error) {
+      // Do not log exception descriptions/details; they can contain user data.
+      debugPrint(
+        'AuthService: Google Sign-In stage=$stage code=${error.code.name}',
+      );
+      rethrow;
+    } on FirebaseAuthException catch (error) {
+      debugPrint('AuthService: Google Sign-In stage=$stage code=${error.code}');
+      rethrow;
+    } on PlatformException catch (error) {
+      debugPrint('AuthService: Google Sign-In stage=$stage code=${error.code}');
+      rethrow;
+    } catch (error) {
+      debugPrint(
+        'AuthService: Google Sign-In stage=$stage '
+        'errorType=${error.runtimeType}',
+      );
+      rethrow;
+    }
   }
 
   Future<void> signOut() async {

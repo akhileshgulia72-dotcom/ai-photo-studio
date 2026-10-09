@@ -21,10 +21,9 @@ class AdUnitConfig {
   AdUnitConfig._();
 
   /// Compile-time switch. Absent, or anything other than `true`, disables it.
-  static const bool useTestAds = bool.fromEnvironment(
-    'ADMOB_USE_TEST_ADS',
-    defaultValue: false,
-  );
+  static const bool useTestAds =
+      kDebugMode &&
+      bool.fromEnvironment('ADMOB_USE_TEST_ADS', defaultValue: false);
 
   static bool get _isIOS => defaultTargetPlatform == TargetPlatform.iOS;
 
@@ -51,11 +50,9 @@ class AdUnitConfig {
   // ===============================================================
   // Google's official test unit ids.
   //
-  // Google documents rewarded, interstitial and banner test units for
-  // both platforms. It does **not** publish a native advanced test unit,
-  // so [native] returns null when test ads are on. That is deliberate:
-  // falling back to the production native unit in a test build would
-  // generate real impressions.
+  // Google publishes rewarded, interstitial, banner, and native test units
+  // for both platforms. These IDs are selected only in debug builds when
+  // ADMOB_USE_TEST_ADS=true is passed.
   // ===============================================================
 
   static const String _testRewardedAndroid =
@@ -67,6 +64,10 @@ class AdUnitConfig {
       'ca-app-pub-3940256099942544/1033173712';
   static const String _testInterstitialIos =
       'ca-app-pub-3940256099942544/4411468910';
+
+  static const String _testNativeAndroid =
+      'ca-app-pub-3940256099942544/2247696110';
+  static const String _testNativeIos = 'ca-app-pub-3940256099942544/3986624511';
 
   static const String _testBannerAndroid =
       'ca-app-pub-3940256099942544/6300978111';
@@ -84,25 +85,19 @@ class AdUnitConfig {
       ? (_isIOS ? _testInterstitialIos : _testInterstitialAndroid)
       : (_isIOS ? _prodInterstitialIos : _prodInterstitialAndroid);
 
-  /// Native advanced. `null` when test ads are enabled, because Google
-  /// publishes no test unit for this format. Callers must skip the slot
-  /// rather than fall back to the production unit.
-  static String? get native {
-    if (useTestAds) return null;
+  /// Native advanced test unit in debug test mode, otherwise production unit.
+  static String get native {
+    if (useTestAds) return _isIOS ? _testNativeIos : _testNativeAndroid;
     return _isIOS ? _prodNativeIos : _prodNativeAndroid;
   }
 
-  /// Banner. Kept null-safe for the same reason as [native]: the app does
-  /// not currently render a banner, and no banner production unit is
-  /// configured, so there is nothing to request. When a banner slot is
+  /// Banner. The app does not currently render a banner, and no banner
+  /// production unit is configured, so there is nothing to request. When a banner slot is
   /// added, set the production ids here rather than inventing them inline.
   static String? get banner {
     if (useTestAds) return _isIOS ? _testBannerIos : _testBannerAndroid;
     return null;
   }
-
-  /// True when the format cannot be served because test ads are enabled.
-  static bool get nativeUnavailableInTestMode => useTestAds;
 
   /// Production native id regardless of [useTestAds]. Exposed only so the
   /// configuration tests can assert production values do not drift.
@@ -130,6 +125,7 @@ class AdUnitConfig {
     return <String, String?>{
       'rewarded': ios ? _testRewardedIos : _testRewardedAndroid,
       'interstitial': ios ? _testInterstitialIos : _testInterstitialAndroid,
+      'native': ios ? _testNativeIos : _testNativeAndroid,
       'banner': ios ? _testBannerIos : _testBannerAndroid,
     };
   }
@@ -137,5 +133,5 @@ class AdUnitConfig {
   /// Human-readable summary for startup diagnostics.
   static String describe() =>
       'AdUnitConfig(platform: $platformName, useTestAds: $useTestAds, '
-      'native: ${native ?? "unavailable in test mode"})';
+      'native: $native)';
 }

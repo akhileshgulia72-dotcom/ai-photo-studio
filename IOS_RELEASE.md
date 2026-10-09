@@ -39,10 +39,8 @@ Android keeps its original units and iOS uses its own.
 
 Source of truth:
 
-- `lib/services/rewarded_ad_service.dart` — `adUnitId`
-- `lib/services/interstitial_ad_service.dart` — `adUnitId`
-- `lib/screens/studio_shell.dart` — `_NativeAdBlockState._unitId`
-- `lib/screens/photo_tools_screen.dart` — `_ToolNativeAdSlotState._productionId`
+- `lib/services/ad_unit_config.dart` — platform-specific IDs for rewarded,
+  interstitial, and native formats, plus the debug-only demo-unit switch
 
 Selection uses `defaultTargetPlatform == TargetPlatform.iOS`, so non-Apple
 platforms keep the Android units. `test/ad_unit_ids_test.dart` asserts this
@@ -85,7 +83,7 @@ Step order:
    `can_upload`
 7. Verify the iOS AdMob application id in `Info.plist` belongs to the VYRO
    account and is not the Android id
-8. Install `GoogleService-Info.plist` from a secret (only when the secret exists)
+8. Validate the iOS OAuth IDs, URL scheme, and Firebase options
 9. `flutter test`
 10. `flutter analyze`
 11. Import the signing certificate and provisioning profile (only when signing is configured)
@@ -131,25 +129,6 @@ Add these under **Settings → Secrets and variables → Actions → New reposit
 > `ios/Runner/Info.plist` as `GADApplicationIdentifier`
 > (`ca-app-pub-7694497723149363~7064149443`), which is how the Google Mobile Ads
 > SDK expects to find it. The workflow verifies it rather than injecting it.
-
-### Optional
-
-| Secret | Format | Why |
-|---|---|---|
-| `GOOGLE_SERVICE_INFO_PLIST_BASE64` | base64 of `GoogleService-Info.plist` | Needed for iOS Google Sign-In. Not required for Firebase itself, because `lib/firebase_options.dart` supplies the options. |
-
-Encode a file to base64 on macOS/Linux:
-
-```sh
-base64 -i certificate.p12 | pbcopy          # macOS
-base64 -w0 certificate.p12 > cert.b64       # Linux
-```
-
-On Windows:
-
-```powershell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("certificate.p12")) | Set-Clipboard
-```
 
 ### Optional repository variable
 
@@ -229,7 +208,7 @@ open ios/Runner.xcworkspace
 
 ## 7. [ACTION REQUIRED] Manual steps outside this repository
 
-### 7.1 iOS AdMob — DONE
+### 7.1 iOS AdMob — code configured; account approval must be checked
 
 The iOS AdMob app and ad units are configured and wired in:
 
@@ -237,31 +216,34 @@ The iOS AdMob app and ad units are configured and wired in:
 - Rewarded `…/8453252739`, Interstitial `…/8336693504`, Native `…/7462595539`
   → selected per platform in Dart (see section 1)
 
-No further AdMob action is required for the build. Confirm in the AdMob console
-that the rewarded unit's reward amount is **5** with item name **credits**, so it
-matches `AD_REWARD_CREDITS = 5` on the backend.
+The app id and platform-specific units are wired in code. Ad serving status is
+controlled by the AdMob account, not this repository. If the app dashboard says
+**Requires review**, complete app verification/app-ads.txt and the app readiness
+review; the app may not fully serve live ads until AdMob marks it ready. Confirm
+the rewarded unit amount is **5** with item name **credits**, matching
+`AD_REWARD_CREDITS = 5` on the backend.
 
-### 7.2 Firebase iOS app registration
+### 7.2 Firebase and Google provider
 
-`lib/firebase_options.dart` now declares `iosBundleId: 'com.agdevelops.ainotescanner'`
-to match the app. The existing iOS app in the Firebase project was registered
-under the old placeholder `com.example.aiNoteScanner`.
+The local `GoogleService-Info.plist`, `lib/firebase_options.dart`, and Xcode
+Runner target agree on Firebase project `ai-note-scanner` and bundle ID
+`com.agdevelops.ainotescanner`. `firebase.json` now points at the same iOS app
+ID as the runtime options. Google Sign-In OAuth IDs are passed explicitly in
+Dart; the reversed client ID URL scheme is in `ios/Runner/Info.plist`.
 
-**[ACTION REQUIRED]** In the Firebase Console either add a new iOS app with
-bundle id `com.agdevelops.ainotescanner`, or edit the existing one, then
-re-download `GoogleService-Info.plist` and run `flutterfire configure`.
-
-If the bundle id in Firebase does not match the app, Firebase Auth fails at
-runtime on iOS.
+The enabled state of the Google provider is stored in Firebase Console and
+cannot be verified from this repository. Android Google Sign-In is reported to
+work for this project; if iOS still fails after this build, capture the safe
+`AuthService` stage/code log and confirm the Google provider remains enabled in
+Firebase Authentication.
 
 ### 7.3 GoogleService-Info.plist
 
-This file is **not** in the repository and was **not** fabricated. VYRO
-initialises Firebase from `lib/firebase_options.dart`, so the app builds and
-starts without it. It is needed for iOS Google Sign-In (the reversed client id
-URL scheme). Download it from the Firebase Console and store it as
-`GOOGLE_SERVICE_INFO_PLIST_BASE64`, or place it at
-`ios/Runner/GoogleService-Info.plist` for local builds (it is gitignored).
+This file is intentionally gitignored. VYRO initializes Firebase from
+`lib/firebase_options.dart` and passes the iOS OAuth client ID plus the Web
+server client ID directly to `google_sign_in` in `AuthService`. The required
+reversed-client-ID URL scheme is committed in `ios/Runner/Info.plist`. The
+release build therefore does not depend on a local copy of this plist.
 
 ### 7.4 App Store Connect app record and in-app purchase
 

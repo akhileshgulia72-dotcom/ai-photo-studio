@@ -892,10 +892,11 @@ jobs:
       # it is cheap. It must run AFTER `pod install` (it regenerates the
       # xcconfig chain) and BEFORE the archive.
       #
-      # The Google OAuth client id is NOT passed here: on iOS
-      # `google_sign_in` reads CLIENT_ID and REVERSED_CLIENT_ID from
-      # GoogleService-Info.plist, which is committed and is the single
-      # source of truth.
+      # The iOS OAuth client ID and Web/server client ID are passed directly
+      # to google_sign_in by AuthService. The reversed client ID URL scheme
+      # remains configured in Runner/Info.plist. GoogleService-Info.plist is
+      # intentionally ignored and is not required at runtime because Firebase
+      # is initialized from lib/firebase_options.dart.
       # =========================================================
       - name: Generate Dart configuration (dart-defines)
         run: |

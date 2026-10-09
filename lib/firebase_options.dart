@@ -63,6 +63,8 @@ class DefaultFirebaseOptions {
     messagingSenderId: '516306315147',
     projectId: 'ai-note-scanner',
     storageBucket: 'ai-note-scanner.firebasestorage.app',
+    iosClientId:
+        '516306315147-kevctuachaha9tp2sto6nnv6ivpodpi7.apps.googleusercontent.com',
     iosBundleId: 'com.agdevelops.ainotescanner',
   );
   static const FirebaseOptions macos = FirebaseOptions(

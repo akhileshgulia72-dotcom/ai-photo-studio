@@ -11,13 +11,11 @@ const googleTestPublisher = 'ca-app-pub-3940256099942544';
 
 void main() {
   group('ADMOB_USE_TEST_ADS default', () {
-    test('test ads are OFF unless explicitly requested at compile time', () {
-      // A normal `flutter test` / `flutter build` must never enable them.
-      // This is the guard that stops Google test units reaching production.
+    test('test ads are OFF unless explicitly requested in debug mode', () {
       expect(
         AdUnitConfig.useTestAds,
         isFalse,
-        reason: 'ADMOB_USE_TEST_ADS must default to false',
+        reason: 'ADMOB_USE_TEST_ADS defaults to false',
       );
     });
   });
@@ -66,12 +64,9 @@ void main() {
       }
     });
 
-    test('native has no test unit, so the slot must be skipped', () {
-      // Google publishes no native advanced test unit. Production must
-      // never be substituted while test mode is on, so `native` is null.
-      // This asserts the contract the native slots rely on.
+    test('iOS native uses Google official demo unit', () {
       final ids = AdUnitConfig.testIdsFor(platform: TargetPlatform.iOS);
-      expect(ids.containsKey('native'), isFalse);
+      expect(ids['native'], '$googleTestPublisher/3986624511');
     });
 
     test('Android and iOS test ids differ', () {
@@ -80,6 +75,7 @@ void main() {
       expect(android['rewarded'], isNot(equals(ios['rewarded'])));
       expect(android['interstitial'], isNot(equals(ios['interstitial'])));
       expect(android['banner'], isNot(equals(ios['banner'])));
+      expect(android['native'], isNot(equals(ios['native'])));
     });
 
     test('no test id is ever a VYRO production id', () {

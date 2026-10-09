@@ -6,6 +6,7 @@ import 'package:google_mobile_ads/google_mobile_ads.dart';
 
 import 'account_profile_service.dart';
 import 'ad_unit_config.dart';
+import 'ad_diagnostics.dart';
 import 'rewarded_ad_service.dart';
 import 'ump_consent_service.dart';
 
@@ -121,6 +122,7 @@ class InterstitialAdService {
           _ad = ad;
 
           debugPrint('InterstitialAdService: ad loaded and ready');
+          logAdResponseInfo('InterstitialAdService', ad.responseInfo);
         },
         onAdFailedToLoad: (error) {
           if (generation != _loadGeneration) return;
@@ -135,33 +137,15 @@ class InterstitialAdService {
   }
 
   static void _logLoadError(LoadAdError error) {
-    final buffer = StringBuffer()
-      ..writeln('InterstitialAdService: load FAILED')
-      ..writeln('  code:     ${error.code}')
-      ..writeln('  domain:   ${error.domain}')
-      ..writeln('  message:  ${error.message}')
-      ..writeln('  unit:     $adUnitId')
-      ..writeln('  testMode: ${AdUnitConfig.useTestAds}')
-      ..writeln('  platform: ${AdUnitConfig.platformName}');
-
-    final responseInfo = error.responseInfo;
-    if (responseInfo != null) {
-      final responses = responseInfo.adapterResponses ?? const [];
-      buffer
-        ..writeln('  adapter:  ${responses.length} response(s)')
-        ..writeln('  responseId: ${responseInfo.responseId}');
-      for (final response in responses) {
-        buffer.writeln(
-          '    - ${response.adapterClassName} '
-          '${response.description} '
-          'latency=${response.latencyMillis}ms',
-        );
-      }
-    } else {
-      buffer.writeln('  responseInfo: unavailable');
-    }
-
-    debugPrint(buffer.toString());
+    debugPrint(
+      'InterstitialAdService: load unit=$adUnitId '
+      'testMode=${AdUnitConfig.useTestAds} platform=${AdUnitConfig.platformName}',
+    );
+    logAdFailure(
+      'InterstitialAdService load',
+      error,
+      responseInfo: error.responseInfo,
+    );
   }
 
   static void _scheduleRetry() {
@@ -341,7 +325,11 @@ class InterstitialAdService {
 
         preload();
 
-        debugPrint('InterstitialAdService: show failed: ${error.message}');
+        logAdFailure(
+          'InterstitialAdService show',
+          error,
+          responseInfo: ad.responseInfo,
+        );
 
         if (!completer.isCompleted) {
           completer.complete();
@@ -349,7 +337,18 @@ class InterstitialAdService {
       },
     );
 
-    ad.show();
+    try {
+      await ad.show();
+    } catch (error) {
+      _showing = false;
+      ad.dispose();
+      debugPrint(
+        'InterstitialAdService: stage=show '
+        'methodErrorType=${error.runtimeType}',
+      );
+      preload();
+      if (!completer.isCompleted) completer.complete();
+    }
 
     await completer.future.timeout(
       const Duration(seconds: 45),

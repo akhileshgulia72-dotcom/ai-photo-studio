@@ -25,6 +25,7 @@ import '../services/api_config.dart';
 import '../services/auth_service.dart';
 import '../services/account_profile_service.dart';
 import '../services/ad_unit_config.dart';
+import '../services/ad_diagnostics.dart';
 import '../services/gallery_save_service.dart';
 
 import 'premium_screen.dart';
@@ -977,10 +978,7 @@ class _NativeAdBlockState extends State<_NativeAdBlock> {
   ];
 
   // Native Advanced unit comes from AdUnitConfig so the platform and the
-  // test/production decision are made in exactly one place.
-  // It is null when test ads are enabled, because Google publishes no
-  // native test unit; the slot is then skipped rather than falling back to
-  // the production unit and generating real impressions.
+  // debug-test/production decision are made in exactly one place.
   static String? get _unitId => AdUnitConfig.native;
 
   @override
@@ -1077,11 +1075,16 @@ class _NativeAdBlockState extends State<_NativeAdBlock> {
           _retryTimer = null;
           _retryAttempt = 0;
           debugPrint('NativeAdBlock: ad loaded');
+          logAdResponseInfo('NativeAdBlock', ad.responseInfo);
           if (mounted) setState(() => _loaded = true);
         },
         onAdFailedToLoad: (ad, error) {
           ad.dispose();
-          _logNativeLoadError(error, unitId);
+          logAdFailure(
+            'NativeAdBlock load unit=$unitId',
+            error,
+            responseInfo: error.responseInfo,
+          );
           if (generation == _loadGeneration) {
             _ad = null;
             _scheduleRetry();
@@ -1089,29 +1092,6 @@ class _NativeAdBlockState extends State<_NativeAdBlock> {
         },
       ),
     )..load();
-  }
-
-  void _logNativeLoadError(LoadAdError error, String unitId) {
-    final buffer = StringBuffer()
-      ..writeln('NativeAdBlock: load FAILED')
-      ..writeln('  code: ${error.code}')
-      ..writeln('  domain: ${error.domain}')
-      ..writeln('  message: ${error.message}')
-      ..writeln('  unit: $unitId');
-    final responseInfo = error.responseInfo;
-    if (responseInfo == null) {
-      buffer.writeln('  responseInfo: unavailable');
-    } else {
-      final responses = responseInfo.adapterResponses ?? const [];
-      buffer.writeln('  adapter responses: ${responses.length}');
-      for (final response in responses) {
-        buffer.writeln(
-          '    - ${response.adapterClassName} ${response.description} '
-          'latency=${response.latencyMillis}ms',
-        );
-      }
-    }
-    debugPrint(buffer.toString());
   }
 
   void _scheduleRetry() {

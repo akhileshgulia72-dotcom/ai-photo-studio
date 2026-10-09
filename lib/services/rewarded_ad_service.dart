@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 
 import 'ad_unit_config.dart';
 import 'api_config.dart';
+import 'ad_diagnostics.dart';
 import 'ump_consent_service.dart';
 
 class RewardedAdService {
@@ -117,6 +118,7 @@ class RewardedAdService {
           _rewardedAd = ad;
 
           debugPrint('RewardedAdService: ad loaded and ready');
+          logAdResponseInfo('RewardedAdService', ad.responseInfo);
         },
         onAdFailedToLoad: (LoadAdError error) {
           if (generation != _loadGeneration) return;
@@ -133,33 +135,15 @@ class RewardedAdService {
   /// Logs every field [LoadAdError] exposes, so a failing unit can be
   /// diagnosed from the device log without guessing.
   static void _logLoadError(String format, LoadAdError error) {
-    final buffer = StringBuffer()
-      ..writeln('RewardedAdService: $format load FAILED')
-      ..writeln('  code:     ${error.code}')
-      ..writeln('  domain:   ${error.domain}')
-      ..writeln('  message:  ${error.message}')
-      ..writeln('  unit:     $adUnitId')
-      ..writeln('  testMode: ${AdUnitConfig.useTestAds}')
-      ..writeln('  platform: ${AdUnitConfig.platformName}');
-
-    final responseInfo = error.responseInfo;
-    if (responseInfo != null) {
-      final responses = responseInfo.adapterResponses ?? const [];
-      buffer
-        ..writeln('  adapter:  ${responses.length} response(s)')
-        ..writeln('  responseId: ${responseInfo.responseId}');
-      for (final response in responses) {
-        buffer.writeln(
-          '    - ${response.adapterClassName} '
-          '${response.description} '
-          'latency=${response.latencyMillis}ms',
-        );
-      }
-    } else {
-      buffer.writeln('  responseInfo: unavailable');
-    }
-
-    debugPrint(buffer.toString());
+    debugPrint(
+      'RewardedAdService: $format load unit=$adUnitId '
+      'testMode=${AdUnitConfig.useTestAds} platform=${AdUnitConfig.platformName}',
+    );
+    logAdFailure(
+      'RewardedAdService $format load',
+      error,
+      responseInfo: error.responseInfo,
+    );
   }
 
   static void _scheduleRetry(String format) {
@@ -288,40 +272,54 @@ class RewardedAdService {
 
         preloadRewardedAd();
 
-        debugPrint('RewardedAdService: show failed: ${error.message}');
+        logAdFailure(
+          'RewardedAdService show',
+          error,
+          responseInfo: ad.responseInfo,
+        );
 
         completeResult(false);
       },
     );
 
-    ad.show(
-      onUserEarnedReward: (AdWithoutView ad, RewardItem reward) async {
-        if (rewardCallbackReceived) return;
+    try {
+      await ad.show(
+        onUserEarnedReward: (AdWithoutView ad, RewardItem reward) async {
+          if (rewardCallbackReceived) return;
 
-        rewardCallbackReceived = true;
+          rewardCallbackReceived = true;
 
-        debugPrint(
-          'RewardedAdService: ADMOB REWARD EARNED '
-          '${reward.amount} ${reward.type}',
-        );
+          debugPrint(
+            'RewardedAdService: ADMOB REWARD EARNED '
+            '${reward.amount} ${reward.type}',
+          );
 
-        try {
-          final granted = await _grantBackendReward(rewardId: rewardId);
+          try {
+            final granted = await _grantBackendReward(rewardId: rewardId);
 
-          if (granted != null) {
-            _lastRewardedAt = DateTime.now();
-            onRewardGranted?.call(granted);
+            if (granted != null) {
+              _lastRewardedAt = DateTime.now();
+              onRewardGranted?.call(granted);
+            }
+
+            completeResult(granted != null);
+          } catch (error) {
+            debugPrint('RewardedAdService: backend reward failed: $error');
+
+            onRewardFailed?.call(error);
+            completeResult(false);
           }
-
-          completeResult(granted != null);
-        } catch (error) {
-          debugPrint('RewardedAdService: backend reward failed: $error');
-
-          onRewardFailed?.call(error);
-          completeResult(false);
-        }
-      },
-    );
+        },
+      );
+    } catch (error) {
+      _isShowing = false;
+      ad.dispose();
+      debugPrint(
+        'RewardedAdService: stage=show methodErrorType=${error.runtimeType}',
+      );
+      preloadRewardedAd();
+      completeResult(false);
+    }
 
     return result.future.timeout(
       const Duration(seconds: 45),
