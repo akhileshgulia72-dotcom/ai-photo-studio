@@ -56,8 +56,8 @@ class UmpConsentService extends ChangeNotifier {
   bool get privacyOptionsRequired =>
       _privacyOptionsStatus == PrivacyOptionsRequirementStatus.required;
 
-  /// Request fresh consent information on each app launch, show only forms
-  /// required by UMP, then report whether requests are permitted.
+  /// Request fresh consent information on each app launch and show a form
+  /// only when UMP requires one. SDK startup runs independently of this flow.
   Future<bool> initialize() => _initialization ??= _updateConsent();
 
   /// The single gate every ad format must consult before requesting an ad.
@@ -100,6 +100,10 @@ class UmpConsentService extends ChangeNotifier {
   }
 
   Future<bool> _updateConsent() async {
+    // SDK initialization does not request ads. Start it while UMP refreshes
+    // consent so a required form or slow consent server cannot delay it.
+    unawaited(_initializeAdsSdk());
+
     final flowFinished = Completer<void>();
     final infoFinished = Completer<void>();
 
@@ -165,15 +169,11 @@ class UmpConsentService extends ChangeNotifier {
     await flowFinished.future;
     await _refreshPermission();
 
-    // The SDK is initialised unconditionally. It does not fetch ads until
-    // UMP permits requests, so this is safe without consent, and it removes
-    // the ordering dependency that previously made a late consent decision
-    // leave the SDK permanently uninitialised.
-    await _initializeAdsSdk();
-
+    // Do not call canRequestAds() here: it awaits initialize(), which is this
+    // very future. Logging the independent state avoids a self-wait/deadlock.
     debugPrint(
-      'UMP: ready=${await canRequestAds()} '
-      'canRequestAds=$_canRequestAds sdkInitialized=$_adsSdkInitialized',
+      'UMP: consent flow finished; canRequestAds=$_canRequestAds '
+      'sdkInitialized=$_adsSdkInitialized',
     );
 
     return _canRequestAds;

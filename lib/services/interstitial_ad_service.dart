@@ -13,6 +13,8 @@ class InterstitialAdService {
   static InterstitialAd? _ad;
   static bool _loading = false;
   static bool _showing = false;
+  static bool _consentListenerAttached = false;
+  static int _loadGeneration = 0;
 
   /// Counts AI template-card selections. Every [TemplateClickCounter.interval]
   /// selection is an eligible ad event.
@@ -50,19 +52,35 @@ class InterstitialAdService {
   static String get adUnitId => AdUnitConfig.interstitial;
 
   static void preload() {
+    _attachConsentListener();
     if (_ad != null || _loading || _showing || adUnitId.isEmpty) {
       return;
     }
 
     _loading = true;
-    unawaited(_loadWhenConsentAllows());
+    final generation = ++_loadGeneration;
+    unawaited(_loadWhenConsentAllows(generation));
   }
 
-  static Future<void> _loadWhenConsentAllows() async {
+  static void _attachConsentListener() {
+    if (_consentListenerAttached) return;
+    _consentListenerAttached = true;
+    UmpConsentService.instance.addListener(() {
+      if (!UmpConsentService.instance.adsAllowed) {
+        clearForConsentChange();
+      } else {
+        preload();
+      }
+    });
+  }
+
+  static Future<void> _loadWhenConsentAllows(int generation) async {
     // Wait for consent and SDK init together instead of sampling once.
     final allowed = await UmpConsentService.instance.waitUntilReady(
       timeout: const Duration(seconds: 12),
     );
+
+    if (generation != _loadGeneration) return;
 
     if (!allowed) {
       debugPrint(
@@ -83,6 +101,10 @@ class InterstitialAdService {
       request: const AdRequest(),
       adLoadCallback: InterstitialAdLoadCallback(
         onAdLoaded: (ad) {
+          if (generation != _loadGeneration) {
+            ad.dispose();
+            return;
+          }
           _loading = false;
           _cancelRetry();
 
@@ -101,6 +123,7 @@ class InterstitialAdService {
           debugPrint('InterstitialAdService: ad loaded and ready');
         },
         onAdFailedToLoad: (error) {
+          if (generation != _loadGeneration) return;
           _loading = false;
           _ad = null;
 
@@ -335,6 +358,7 @@ class InterstitialAdService {
   }
 
   static void clearForConsentChange() {
+    _loadGeneration++;
     _cancelRetry();
     _ad?.dispose();
     _ad = null;

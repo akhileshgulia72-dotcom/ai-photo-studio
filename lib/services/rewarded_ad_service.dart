@@ -14,6 +14,8 @@ class RewardedAdService {
   static RewardedAd? _rewardedAd;
   static bool _isLoading = false;
   static bool _isShowing = false;
+  static bool _consentListenerAttached = false;
+  static int _loadGeneration = 0;
   static DateTime? _lastRewardedAt;
 
   /// Bounded retry state. Cancelled whenever an ad loads, consent changes,
@@ -42,23 +44,39 @@ class RewardedAdService {
   static bool get isShowing => _isShowing;
 
   static void preloadRewardedAd() {
+    _attachConsentListener();
     if (_rewardedAd != null || _isLoading || _isShowing) return;
 
     _isLoading = true;
+    final generation = ++_loadGeneration;
     debugPrint(
       'RewardedAdService: loading rewarded ad '
       '(${AdUnitConfig.useTestAds ? 'TEST' : 'PRODUCTION'} unit ${AdUnitConfig.rewarded})',
     );
 
-    unawaited(_loadWhenConsentAllows());
+    unawaited(_loadWhenConsentAllows(generation));
   }
 
-  static Future<void> _loadWhenConsentAllows() async {
+  static void _attachConsentListener() {
+    if (_consentListenerAttached) return;
+    _consentListenerAttached = true;
+    UmpConsentService.instance.addListener(() {
+      if (!UmpConsentService.instance.adsAllowed) {
+        clearForConsentChange();
+      } else {
+        preloadRewardedAd();
+      }
+    });
+  }
+
+  static Future<void> _loadWhenConsentAllows(int generation) async {
     // Wait for consent *and* SDK init rather than sampling once. Sampling
     // once meant a preload that raced startup was dropped permanently.
     final allowed = await UmpConsentService.instance.waitUntilReady(
       timeout: const Duration(seconds: 12),
     );
+
+    if (generation != _loadGeneration) return;
 
     if (!allowed) {
       debugPrint(
@@ -79,6 +97,10 @@ class RewardedAdService {
       request: const AdRequest(),
       rewardedAdLoadCallback: RewardedAdLoadCallback(
         onAdLoaded: (RewardedAd ad) {
+          if (generation != _loadGeneration) {
+            ad.dispose();
+            return;
+          }
           _isLoading = false;
           _cancelRetry();
 
@@ -97,6 +119,7 @@ class RewardedAdService {
           debugPrint('RewardedAdService: ad loaded and ready');
         },
         onAdFailedToLoad: (LoadAdError error) {
+          if (generation != _loadGeneration) return;
           _isLoading = false;
           _rewardedAd = null;
 
@@ -352,6 +375,7 @@ class RewardedAdService {
   }
 
   static void dispose() {
+    _loadGeneration++;
     _cancelRetry();
     _rewardedAd?.dispose();
     _rewardedAd = null;
@@ -360,6 +384,7 @@ class RewardedAdService {
   }
 
   static void clearForConsentChange() {
+    _loadGeneration++;
     _cancelRetry();
     _rewardedAd?.dispose();
     _rewardedAd = null;
