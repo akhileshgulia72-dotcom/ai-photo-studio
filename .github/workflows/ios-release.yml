@@ -971,87 +971,6 @@ jobs:
           echo "========================================"
 
       # =========================================================
-      # 13. PROVE THE BUILD SETTINGS RESOLVE
-      #
-      # Signing config has so far been inferred from warnings. This prints
-      # the values xcodebuild will actually use, so a signing failure is
-      # diagnosable from the log rather than guessed at.
-      #
-      # PODFILE_LOCK matters most: if the Runner target does not inherit it
-      # from the Pods xcconfig, the [CP] Check Pods Manifest.lock phase
-      # expands it to a bare "/Podfile.lock" and the archive fails with
-      # "The sandbox is not in sync with the Podfile.lock".
-      # =========================================================
-      - name: Show resolved build settings
-        env:
-          DEVELOPER_DIR: "/Applications/Xcode_26.3.app/Contents/Developer"
-        run: |
-          set -euo pipefail
-
-          echo "========================================"
-          echo "RESOLVED BUILD SETTINGS (Runner, Release)"
-          echo "========================================"
-
-          xcodebuild \
-            -workspace ios/Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Release \
-            -showBuildSettings \
-            > "$RUNNER_TEMP/build_settings.txt" 2>&1 || true
-
-          if [ ! -s "$RUNNER_TEMP/build_settings.txt" ]; then
-            echo "ERROR: -showBuildSettings produced no output."
-            exit 1
-          fi
-
-          for key in \
-            PODFILE_LOCK \
-            PODS_ROOT \
-            SRCROOT \
-            CODE_SIGN_STYLE \
-            CODE_SIGN_IDENTITY \
-            DEVELOPMENT_TEAM \
-            PROVISIONING_PROFILE_SPECIFIER \
-            PRODUCT_BUNDLE_IDENTIFIER \
-            IPHONEOS_DEPLOYMENT_TARGET
-          do
-            value=$(grep -m1 -E "^ +${key} = " "$RUNNER_TEMP/build_settings.txt" \
-              | sed 's/^[^=]*= //' || true)
-            printf '  %-32s = %s\n' "$key" "${value:-(NOT SET)}"
-          done
-
-          echo ""
-
-          podfile_lock=$(grep -m1 -E '^ +PODFILE_LOCK = ' "$RUNNER_TEMP/build_settings.txt" \
-            | sed 's/^[^=]*= //' || true)
-
-          if [ -z "$podfile_lock" ]; then
-            echo "ERROR: PODFILE_LOCK is not set on the Runner target."
-            echo "The target is not inheriting the Pods xcconfig, so the"
-            echo "[CP] Check Pods Manifest.lock phase will fail."
-            echo ""
-            echo "ios/Flutter/Debug.xcconfig:"
-            cat ios/Flutter/Debug.xcconfig || true
-            echo ""
-            echo "ios/Flutter/Release.xcconfig:"
-            cat ios/Flutter/Release.xcconfig || true
-            echo ""
-            echo "Pods xcconfig directory:"
-            ls -la "ios/Pods/Target Support Files" 2>/dev/null || echo "  (missing)"
-            exit 1
-          fi
-
-          if [ ! -f "$podfile_lock" ]; then
-            echo "ERROR: PODFILE_LOCK is '$podfile_lock' but no such file exists."
-            ls -la "$(dirname "$podfile_lock")" 2>/dev/null || true
-            exit 1
-          fi
-
-          echo "PODFILE_LOCK resolves to a real file: $podfile_lock"
-          echo ""
-          echo "Build settings verified."
-
-      # =========================================================
       # 14. ARCHIVE
       #
       # Signing is NOT passed as xcodebuild command-line arguments.
@@ -1248,7 +1167,6 @@ jobs:
             -exportArchive \
             -archivePath "$RUNNER_TEMP/VYRO.xcarchive" \
             -exportOptionsPlist ios/ExportOptions.plist \
-            -allowProvisioningUpdates \
             -exportPath "$RUNNER_TEMP/export" 2>&1 \
             | tee "$RUNNER_TEMP/export.log"
           EXPORT_STATUS=${PIPESTATUS[0]}
@@ -1420,51 +1338,13 @@ jobs:
           echo "(Processing on App Store Connect can take 5-15 minutes.)"
           echo ""
 
-          uploaded=0
-
-          # Preferred: iTMSTransporter. altool's --upload-app is legacy on
-          # recent Xcode and may be unavailable, so it is only a fallback.
-          if xcrun --find iTMSTransporter >/dev/null 2>&1; then
-            echo "Using xcrun iTMSTransporter"
-
-            if xcrun iTMSTransporter -m upload \
-                 -f "$IPA" \
-                 -k "$KEY_DIR/private_keys/AuthKey_${ASC_KEY_ID}.p8" \
-                 -i "$ASC_ISSUER_ID" \
-                 -itc_provider "$ASC_ISSUER_ID"; then
-              uploaded=1
-            else
-              echo "iTMSTransporter failed; falling back to altool."
-            fi
-          else
-            echo "iTMSTransporter is not available in this Xcode."
-          fi
-
-          if [ "$uploaded" -ne 1 ]; then
-            echo ""
-            echo "Using xcrun altool --upload-app"
-
-            if xcrun altool \
-                 --upload-app \
-                 -f "$IPA" \
-                 -t ios \
-                 --apiKey "$ASC_KEY_ID" \
-                 --apiIssuer "$ASC_ISSUER_ID" \
-                 --verbose; then
-              uploaded=1
-            else
-              echo ""
-              echo "========================================"
-              echo "UPLOAD FAILED"
-              echo "========================================"
-              echo "Both iTMSTransporter and altool failed."
-              echo "Common causes:"
-              echo "  - the API key lacks the App Manager role"
-              echo "  - the app record does not exist in App Store Connect"
-              echo "  - the bundle id is not registered for this team"
-              exit 1
-            fi
-          fi
+          xcrun altool \
+            --upload-app \
+            -f "$IPA" \
+            -t ios \
+            --apiKey "$ASC_KEY_ID" \
+            --apiIssuer "$ASC_ISSUER_ID" \
+            --verbose
 
           echo ""
           echo "========================================"
