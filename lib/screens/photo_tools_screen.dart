@@ -8,6 +8,7 @@ import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import '../widgets/premium_background.dart';
 import '../services/account_profile_service.dart';
+import '../services/ad_unit_config.dart';
 import '../services/rewarded_ad_service.dart';
 import '../services/interstitial_ad_service.dart';
 import '../services/gallery_save_service.dart';
@@ -525,15 +526,11 @@ class _ToolNativeAdSlotState extends State<_ToolNativeAdSlot> {
   bool _loaded = false;
   bool _hide = false;
   bool _loading = false;
-  static const _testId = 'ca-app-pub-3940256099942544/2247696110';
-  static const _androidProductionId =
-      'ca-app-pub-7694497723149363/6374835026';
-  static const _iosProductionId =
-      'ca-app-pub-7694497723149363/7462595539';
-  static String get _productionId =>
-      defaultTargetPlatform == TargetPlatform.iOS
-          ? _iosProductionId
-          : _androidProductionId;
+  // Native unit comes from AdUnitConfig: one place decides platform and
+  // test/production. It is null when test ads are enabled, because Google
+  // publishes no native test unit, so the slot is skipped rather than
+  // falling back to the production unit.
+  static String? get _unitId => AdUnitConfig.native;
 
   @override
   void initState() {
@@ -560,9 +557,28 @@ class _ToolNativeAdSlotState extends State<_ToolNativeAdSlot> {
 
   Future<void> _load() async {
     if (_loading || _ad != null) return;
+
+    final id = _unitId;
+    if (id == null) {
+      debugPrint(
+        'ToolNativeAdSlot: native slot skipped - '
+        'no unit available (testAds=${AdUnitConfig.useTestAds})',
+      );
+      _hide = true;
+      if (mounted) setState(() {});
+      return;
+    }
+
     _loading = true;
     try {
-      if (!await UmpConsentService.instance.canRequestAds()) {
+      // Wait for consent and SDK init together instead of sampling once.
+      if (!await UmpConsentService.instance.waitUntilReady(
+        timeout: const Duration(seconds: 8),
+      )) {
+        debugPrint(
+          'ToolNativeAdSlot: not loading - '
+          '${UmpConsentService.instance.describe()}',
+        );
         _hide = true;
         return;
       }
@@ -571,16 +587,14 @@ class _ToolNativeAdSlotState extends State<_ToolNativeAdSlot> {
         _hide = true;
         return;
       }
-    } catch (_) {
+    } catch (error) {
+      debugPrint('ToolNativeAdSlot: skipping - $error');
       _hide = true;
       return;
     } finally {
       _loading = false;
     }
-    final id = const bool.fromEnvironment('dart.vm.product')
-        ? _productionId
-        : _testId;
-    if (!mounted || id.isEmpty || !UmpConsentService.instance.adsAllowed) {
+    if (!mounted || !UmpConsentService.instance.adsAllowed) {
       return;
     }
     _ad = NativeAd(
@@ -597,10 +611,15 @@ class _ToolNativeAdSlotState extends State<_ToolNativeAdSlot> {
             ad.dispose();
             return;
           }
+          debugPrint('ToolNativeAdSlot: ad loaded');
           if (mounted) setState(() => _loaded = true);
         },
-        onAdFailedToLoad: (ad, _) {
+        onAdFailedToLoad: (ad, error) {
           ad.dispose();
+          debugPrint(
+            'ToolNativeAdSlot: load FAILED code=${error.code} '
+            'domain=${error.domain} message=${error.message} unit=$id',
+          );
         },
       ),
     )..load();

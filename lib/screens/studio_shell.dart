@@ -24,6 +24,7 @@ import '../services/creation_service.dart';
 import '../services/api_config.dart';
 import '../services/auth_service.dart';
 import '../services/account_profile_service.dart';
+import '../services/ad_unit_config.dart';
 import '../services/gallery_save_service.dart';
 
 import 'premium_screen.dart';
@@ -967,14 +968,12 @@ class _NativeAdBlockState extends State<_NativeAdBlock> {
   bool _adFree = false;
   bool _loading = false;
 
-  // Production Native Advanced ad units, one per platform.
-  // This app intentionally uses the production unit in all builds.
-  static const _androidUnitId = 'ca-app-pub-7694497723149363/6374835026';
-  static const _iosUnitId = 'ca-app-pub-7694497723149363/7462595539';
-  static String get _unitId =>
-      defaultTargetPlatform == TargetPlatform.iOS
-          ? _iosUnitId
-          : _androidUnitId;
+  // Native Advanced unit comes from AdUnitConfig so the platform and the
+  // test/production decision are made in exactly one place.
+  // It is null when test ads are enabled, because Google publishes no
+  // native test unit; the slot is then skipped rather than falling back to
+  // the production unit and generating real impressions.
+  static String? get _unitId => AdUnitConfig.native;
 
   @override
   void initState() {
@@ -1001,9 +1000,28 @@ class _NativeAdBlockState extends State<_NativeAdBlock> {
 
   Future<void> _loadIfAllowed() async {
     if (_loading || _ad != null) return;
+
+    final unitId = _unitId;
+    if (unitId == null) {
+      debugPrint(
+        'NativeAdBlock: native slot skipped - '
+        'no unit available (testAds=${AdUnitConfig.useTestAds})',
+      );
+      _adFree = true;
+      if (mounted) setState(() {});
+      return;
+    }
+
     _loading = true;
     try {
-      if (!await UmpConsentService.instance.canRequestAds()) {
+      // Wait for consent and SDK init together instead of sampling once.
+      if (!await UmpConsentService.instance.waitUntilReady(
+        timeout: const Duration(seconds: 8),
+      )) {
+        debugPrint(
+          'NativeAdBlock: not loading - '
+          '${UmpConsentService.instance.describe()}',
+        );
         _adFree = true;
         return;
       }
@@ -1012,18 +1030,19 @@ class _NativeAdBlockState extends State<_NativeAdBlock> {
         _adFree = true;
         return;
       }
-    } catch (_) {
+    } catch (error) {
       // Hide ads unless entitlement can be verified.
+      debugPrint('NativeAdBlock: skipping - $error');
       _adFree = true;
       return;
     } finally {
       _loading = false;
     }
-    if (!mounted || _unitId.isEmpty || !UmpConsentService.instance.adsAllowed) {
+    if (!mounted || !UmpConsentService.instance.adsAllowed) {
       return;
     }
     _ad = NativeAd(
-      adUnitId: _unitId,
+      adUnitId: unitId,
       request: const AdRequest(),
       nativeTemplateStyle: NativeTemplateStyle(
         templateType: widget.compact ? TemplateType.small : TemplateType.medium,
@@ -1036,10 +1055,15 @@ class _NativeAdBlockState extends State<_NativeAdBlock> {
             ad.dispose();
             return;
           }
+          debugPrint('NativeAdBlock: ad loaded');
           if (mounted) setState(() => _loaded = true);
         },
         onAdFailedToLoad: (ad, error) {
           ad.dispose();
+          debugPrint(
+            'NativeAdBlock: load FAILED code=${error.code} '
+            'domain=${error.domain} message=${error.message} unit=$unitId',
+          );
         },
       ),
     )..load();
@@ -2251,9 +2275,7 @@ class _ResultScreenState extends State<ResultScreen> {
                     onPressed: _busy ? null : _share,
                     icon: const Icon(Icons.ios_share_rounded),
                     label: Text(
-                      !_cleanUnlocked && !_isPremium
-                          ? 'Share'
-                          : 'Share Clean',
+                      !_cleanUnlocked && !_isPremium ? 'Share' : 'Share Clean',
                     ),
                   ),
                 ),
@@ -2589,9 +2611,9 @@ Future<void> _contactSupport(BuildContext context) async {
 
   void notify(String message) {
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   try {

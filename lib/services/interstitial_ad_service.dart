@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 
 import 'account_profile_service.dart';
+import 'ad_unit_config.dart';
 import 'rewarded_ad_service.dart';
 import 'ump_consent_service.dart';
 
@@ -15,12 +16,10 @@ class InterstitialAdService {
 
   /// Counts AI template-card selections. Every [TemplateClickCounter.interval]
   /// selection is an eligible ad event.
-  static final TemplateClickCounter _counter =
-      TemplateClickCounter();
+  static final TemplateClickCounter _counter = TemplateClickCounter();
 
   /// Counts screen-to-screen navigations for the separate transition policy.
-  static final ScreenTransitionCounter _navCounter =
-      ScreenTransitionCounter();
+  static final ScreenTransitionCounter _navCounter = ScreenTransitionCounter();
 
   /// Minimum spacing between two interstitials. Keeps the every-3rd rule from
   /// stacking ads back-to-back when a user taps through screens quickly.
@@ -30,29 +29,28 @@ class InterstitialAdService {
 
   static bool _templateAdDue = false;
 
+  /// Bounded retry state, cancelled on load, consent change or dispose.
+  static Timer? _retryTimer;
+  static int _retryAttempt = 0;
+
+  static const int _maxLoadRetries = 4;
+  static const List<Duration> _retryDelays = <Duration>[
+    Duration(seconds: 2),
+    Duration(seconds: 5),
+    Duration(seconds: 15),
+    Duration(seconds: 30),
+  ];
+
   /// True when no interstitial has been shown inside [minimumGap].
   static bool get cooldownElapsed {
     final last = _lastShownAt;
     return last == null || DateTime.now().difference(last) >= minimumGap;
   }
 
-  // Production interstitial ad units, one per platform.
-  // This service intentionally uses the production unit in all builds.
-  static const String _androidAdUnitId =
-      'ca-app-pub-7694497723149363/7630322351';
-  static const String _iosAdUnitId =
-      'ca-app-pub-7694497723149363/8336693504';
-
-  static String get adUnitId =>
-      defaultTargetPlatform == TargetPlatform.iOS
-          ? _iosAdUnitId
-          : _androidAdUnitId;
+  static String get adUnitId => AdUnitConfig.interstitial;
 
   static void preload() {
-    if (_ad != null ||
-        _loading ||
-        _showing ||
-        adUnitId.isEmpty) {
+    if (_ad != null || _loading || _showing || adUnitId.isEmpty) {
       return;
     }
 
@@ -61,12 +59,16 @@ class InterstitialAdService {
   }
 
   static Future<void> _loadWhenConsentAllows() async {
-    try {
-      if (!await UmpConsentService.instance.canRequestAds()) {
-        _loading = false;
-        return;
-      }
-    } catch (_) {
+    // Wait for consent and SDK init together instead of sampling once.
+    final allowed = await UmpConsentService.instance.waitUntilReady(
+      timeout: const Duration(seconds: 12),
+    );
+
+    if (!allowed) {
+      debugPrint(
+        'InterstitialAdService: not loading - '
+        '${UmpConsentService.instance.describe()}',
+      );
       _loading = false;
       return;
     }
@@ -82,8 +84,13 @@ class InterstitialAdService {
       adLoadCallback: InterstitialAdLoadCallback(
         onAdLoaded: (ad) {
           _loading = false;
+          _cancelRetry();
 
           if (!UmpConsentService.instance.adsAllowed) {
+            debugPrint(
+              'InterstitialAdService: consent withdrawn before load '
+              'completed, disposing ad',
+            );
             ad.dispose();
             return;
           }
@@ -91,26 +98,87 @@ class InterstitialAdService {
           _ad?.dispose();
           _ad = ad;
 
-          debugPrint(
-            'InterstitialAdService: production ad loaded',
-          );
+          debugPrint('InterstitialAdService: ad loaded and ready');
         },
         onAdFailedToLoad: (error) {
           _loading = false;
           _ad = null;
 
-          debugPrint(
-            'InterstitialAdService: load failed: $error',
-          );
+          _logLoadError(error);
+          _scheduleRetry();
         },
       ),
     );
   }
 
+  static void _logLoadError(LoadAdError error) {
+    final buffer = StringBuffer()
+      ..writeln('InterstitialAdService: load FAILED')
+      ..writeln('  code:     ${error.code}')
+      ..writeln('  domain:   ${error.domain}')
+      ..writeln('  message:  ${error.message}')
+      ..writeln('  unit:     $adUnitId')
+      ..writeln('  testMode: ${AdUnitConfig.useTestAds}')
+      ..writeln('  platform: ${AdUnitConfig.platformName}');
+
+    final responseInfo = error.responseInfo;
+    if (responseInfo != null) {
+      final responses = responseInfo.adapterResponses ?? const [];
+      buffer
+        ..writeln('  adapter:  ${responses.length} response(s)')
+        ..writeln('  responseId: ${responseInfo.responseId}');
+      for (final response in responses) {
+        buffer.writeln(
+          '    - ${response.adapterClassName} '
+          '${response.description} '
+          'latency=${response.latencyMillis}ms',
+        );
+      }
+    } else {
+      buffer.writeln('  responseInfo: unavailable');
+    }
+
+    debugPrint(buffer.toString());
+  }
+
+  static void _scheduleRetry() {
+    if (!UmpConsentService.instance.adsAllowed) return;
+    if (_retryAttempt >= _maxLoadRetries) {
+      debugPrint(
+        'InterstitialAdService: giving up after $_retryAttempt retries',
+      );
+      return;
+    }
+
+    final delay =
+        _retryDelays[_retryAttempt < _retryDelays.length
+            ? _retryAttempt
+            : _retryDelays.length - 1];
+    _retryAttempt++;
+
+    debugPrint(
+      'InterstitialAdService: scheduling retry $_retryAttempt/$_maxLoadRetries '
+      'in $delay',
+    );
+
+    _retryTimer?.cancel();
+    _retryTimer = Timer(delay, () {
+      _retryTimer = null;
+      if (_ad != null || _showing || _loading) return;
+      if (!UmpConsentService.instance.adsAllowed) return;
+      preload();
+    });
+  }
+
+  static void _cancelRetry() {
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    _retryAttempt = 0;
+  }
+
   static Future<bool> _isPremium() async {
     try {
-      return (await AccountProfileService.instance.refresh())
-          .isAdFree;
+      return (await AccountProfileService.instance.refresh()).isAdFree;
     } catch (_) {
       // Fail closed: do not risk showing an ad to a paid user
       // while entitlement cannot be verified.
@@ -121,9 +189,7 @@ class InterstitialAdService {
   /// Call only after a user taps an AI template card.
   /// The counter is static for the entire app process, so rebuilds
   /// and navigation cannot reset it.
-  static Future<void> showForTemplateCardClick(
-    BuildContext context,
-  ) async {
+  static Future<void> showForTemplateCardClick(BuildContext context) async {
     if (!_counter.recordSelection()) {
       preload();
       return;
@@ -172,12 +238,8 @@ class InterstitialAdService {
     await _show(context);
   }
 
-  static Future<void> showForDownload(
-    BuildContext context,
-  ) async {
-    if (_templateAdDue ||
-        await _isPremium() ||
-        !context.mounted) {
+  static Future<void> showForDownload(BuildContext context) async {
+    if (_templateAdDue || await _isPremium() || !context.mounted) {
       return;
     }
 
@@ -186,9 +248,7 @@ class InterstitialAdService {
 
   /// Tool exports are a separate ad event from AI template selection.
   /// This deliberately does not touch the template click counter.
-  static Future<void> showForToolProcessing(
-    BuildContext context,
-  ) async {
+  static Future<void> showForToolProcessing(BuildContext context) async {
     if (_showing ||
         RewardedAdService.rewardedRecently ||
         await _isPremium() ||
@@ -200,10 +260,10 @@ class InterstitialAdService {
     await _show(context);
   }
 
-  static Future<void> _show(
-    BuildContext context,
-  ) async {
-    if (!await UmpConsentService.instance.canRequestAds()) {
+  static Future<void> _show(BuildContext context) async {
+    if (!await UmpConsentService.instance.waitUntilReady(
+      timeout: const Duration(seconds: 5),
+    )) {
       clearForConsentChange();
       return;
     }
@@ -218,9 +278,7 @@ class InterstitialAdService {
       var waitedMs = 0;
 
       while (_loading && waitedMs < maxWaitMs) {
-        await Future<void>.delayed(
-          const Duration(milliseconds: pollMs),
-        );
+        await Future<void>.delayed(const Duration(milliseconds: pollMs));
         waitedMs += pollMs;
       }
 
@@ -237,15 +295,12 @@ class InterstitialAdService {
 
     final completer = Completer<void>();
 
-    ad.fullScreenContentCallback =
-        FullScreenContentCallback(
+    ad.fullScreenContentCallback = FullScreenContentCallback(
       onAdShowedFullScreenContent: (ad) {
         // Stamp the shared cooldown only once an ad really covered the app.
         _lastShownAt = DateTime.now();
 
-        debugPrint(
-          'InterstitialAdService: production ad shown',
-        );
+        debugPrint('InterstitialAdService: ad shown');
       },
       onAdDismissedFullScreenContent: (ad) {
         _showing = false;
@@ -257,18 +312,13 @@ class InterstitialAdService {
           completer.complete();
         }
       },
-      onAdFailedToShowFullScreenContent: (
-        ad,
-        error,
-      ) {
+      onAdFailedToShowFullScreenContent: (ad, error) {
         _showing = false;
         ad.dispose();
 
         preload();
 
-        debugPrint(
-          'InterstitialAdService: show failed: $error',
-        );
+        debugPrint('InterstitialAdService: show failed: ${error.message}');
 
         if (!completer.isCompleted) {
           completer.complete();
@@ -285,6 +335,7 @@ class InterstitialAdService {
   }
 
   static void clearForConsentChange() {
+    _cancelRetry();
     _ad?.dispose();
     _ad = null;
     _loading = false;
@@ -330,9 +381,7 @@ class InterstitialNavigationObserver extends NavigatorObserver {
 /// Session-persistent counting policy used only by
 /// template-card selections.
 class TemplateClickCounter {
-  TemplateClickCounter({
-    this.interval = 3,
-  }) : assert(interval > 0);
+  TemplateClickCounter({this.interval = 3}) : assert(interval > 0);
 
   final int interval;
 
@@ -359,9 +408,7 @@ class TemplateClickCounter {
 /// Kept separate from [TemplateClickCounter] so a user tapping through screens
 /// and a user tapping template cards each get their own every-3rd cadence.
 class ScreenTransitionCounter {
-  ScreenTransitionCounter({
-    this.interval = 3,
-  }) : assert(interval > 0);
+  ScreenTransitionCounter({this.interval = 3}) : assert(interval > 0);
 
   final int interval;
 
