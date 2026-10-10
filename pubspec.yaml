@@ -4,7 +4,7 @@ description: "Choose a look, upload a photo, and create something extraordinary.
 
 publish_to: 'none'
 
-version: 1.0.0+21
+version: 1.0.0+22
 
 environment:
   sdk: ^3.12.2

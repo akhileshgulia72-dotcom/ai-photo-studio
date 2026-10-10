@@ -8,22 +8,24 @@ import 'package:flutter/foundation.dart';
 ///   1. Platform — Android and iOS need *different* production unit ids.
 ///      Using an Android unit id in an iOS slot silently serves nothing,
 ///      which is invisible in the AdMob dashboard.
-///   2. Environment — production units must never be requested from a
-///      development build, and test units must never ship.
+///   2. Environment — test units are selected only when an explicit
+///      compile-time define is passed to a build.
 ///
-/// [useTestAds] is a compile-time constant, so the ids below cannot be
-/// swapped at runtime and test ids cannot reach a release build by
-/// accident. It defaults to `false`: a normal build uses the real ids.
+/// [useTestAds] is a compile-time constant. It defaults to `false`, so
+/// ordinary builds use production ids. Release builds can opt in when they
+/// need to validate ad rendering before the app is approved for live ads.
 ///
 /// Enable test ads with:
 ///   flutter run --dart-define=ADMOB_USE_TEST_ADS=true
+///   flutter build ipa --dart-define=ADMOB_USE_TEST_ADS=true
 class AdUnitConfig {
   AdUnitConfig._();
 
   /// Compile-time switch. Absent, or anything other than `true`, disables it.
-  static const bool useTestAds =
-      kDebugMode &&
-      bool.fromEnvironment('ADMOB_USE_TEST_ADS', defaultValue: false);
+  static const bool useTestAds = bool.fromEnvironment(
+    'ADMOB_USE_TEST_ADS',
+    defaultValue: false,
+  );
 
   static bool get _isIOS => defaultTargetPlatform == TargetPlatform.iOS;
 
@@ -51,8 +53,8 @@ class AdUnitConfig {
   // Google's official test unit ids.
   //
   // Google publishes rewarded, interstitial, banner, and native test units
-  // for both platforms. These IDs are selected only in debug builds when
-  // ADMOB_USE_TEST_ADS=true is passed.
+  // for both platforms. These IDs are selected only when
+  // ADMOB_USE_TEST_ADS=true is explicitly passed to the build.
   // ===============================================================
 
   static const String _testRewardedAndroid =

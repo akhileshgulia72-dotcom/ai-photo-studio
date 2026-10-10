@@ -920,7 +920,10 @@ jobs:
           flutter build ios --release --config-only \
             --build-name=1.0.0 \
             --build-number="${GITHUB_RUN_NUMBER}" \
-            --dart-define=GENERATION_API_BASE_URL="${GENERATION_API_BASE_URL}"
+            --dart-define=GENERATION_API_BASE_URL="${GENERATION_API_BASE_URL}" \
+            --dart-define=ADMOB_USE_TEST_ADS=true
+
+          echo "Test AdMob units enabled for this TestFlight validation build."
 
           echo ""
           echo "DART_DEFINES written to Generated.xcconfig:"

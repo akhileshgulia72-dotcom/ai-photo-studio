@@ -18,7 +18,7 @@ blocker that needs an Apple, AdMob, or Firebase account action is marked
 | Scheme | `Runner` |
 | CocoaPods | Required (`ios/Podfile` committed), SPM disabled for iOS |
 | Flutter version | `3.44.2` (Dart `3.12.2`) |
-| Version / build | `1.0.0` from `pubspec.yaml`; build number supplied per run |
+| Version / build | `1.0.0+22` from `pubspec.yaml`; TestFlight workflow supplies its run number |
 | Display name | `AI Photo Studio` (from `Info.plist`) |
 | Production backend | `https://vyro-api-jnz6yqjl4a-el.a.run.app` |
 | Firebase init | `lib/firebase_options.dart` via `Firebase.initializeApp(options:)` |
@@ -40,7 +40,12 @@ Android keeps its original units and iOS uses its own.
 Source of truth:
 
 - `lib/services/ad_unit_config.dart` — platform-specific IDs for rewarded,
-  interstitial, and native formats, plus the debug-only demo-unit switch
+  interstitial, and native formats, plus the opt-in demo-unit switch
+
+The iOS TestFlight workflow explicitly opts into Google's official demo ad
+units so ad loading and rendering can be validated before live ads are approved.
+Normal builds continue to use production units unless they pass
+`--dart-define=ADMOB_USE_TEST_ADS=true`.
 
 Selection uses `defaultTargetPlatform == TargetPlatform.iOS`, so non-Apple
 platforms keep the Android units. `test/ad_unit_ids_test.dart` asserts this

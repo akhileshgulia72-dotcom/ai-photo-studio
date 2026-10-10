@@ -11,11 +11,11 @@ const googleTestPublisher = 'ca-app-pub-3940256099942544';
 
 void main() {
   group('ADMOB_USE_TEST_ADS default', () {
-    test('test ads are OFF unless explicitly requested in debug mode', () {
+    test('test ads are OFF unless explicitly requested at build time', () {
       expect(
         AdUnitConfig.useTestAds,
         isFalse,
-        reason: 'ADMOB_USE_TEST_ADS defaults to false',
+        reason: 'ADMOB_USE_TEST_ADS defaults to false in ordinary builds',
       );
     });
   });
