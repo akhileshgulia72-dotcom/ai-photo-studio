@@ -2734,7 +2734,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
         content: const Text(
           'This permanently deletes your account, saved creations, and remaining '
           'credits. Apple purchase records may be retained in a pseudonymous '
-          'form to prevent duplicate credit grants.',
+          'form to prevent duplicate credit grants. If you used Sign in with '
+          'Apple, also revoke VYRO in your Apple Account settings after deletion.',
         ),
         actions: [
           TextButton(
