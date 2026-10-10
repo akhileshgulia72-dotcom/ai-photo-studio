@@ -31,3 +31,10 @@
 20. Create both Apple products as consumables with the exact IDs documented in
     `ENVIRONMENT.md`, complete Paid Apps Agreement/tax/banking setup, and test
     each SKU with a sandbox tester.
+21. Enable Sign in with Apple for the iOS App ID and Firebase Authentication;
+    verify sign-in and guest-account linking on an iPhone.
+22. Test `DELETE /v1/account` with a disposable account. Confirm its Firebase
+    Auth record, profile, generations, and Storage files are removed while
+    Apple transaction replay protection remains pseudonymous.
+23. Before each image generation, verify the AI processing disclosure is shown
+    and the user must affirmatively continue.

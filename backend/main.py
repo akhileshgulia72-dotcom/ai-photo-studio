@@ -94,6 +94,7 @@ from firebase_admin import credentials, firestore, storage
 
 from apple_iap import (
     AppleIapConfig,
+    deleted_account_fingerprint,
     duplicate_purchase_action,
     validate_transaction_claims,
     verify_apple_transaction,
@@ -1492,6 +1493,56 @@ def verify_firebase_user(
             detail="Invalid or expired Firebase authentication token.",
 
         ) from exc
+
+
+def _delete_firebase_account_data(uid: str) -> None:
+    """Delete the user's profile, creations, and image files before Auth."""
+    user_ref = db.collection("users").document(uid)
+    generations_ref = user_ref.collection("generations")
+    for generation in generations_ref.stream():
+        generation_data = generation.to_dict() or {}
+        storage_path = generation_data.get("storagePath")
+        expected_prefix = f"users/{uid}/generations/"
+        if isinstance(storage_path, str) and storage_path.startswith(expected_prefix):
+            bucket.blob(storage_path).delete(ignore_not_found=True)
+        generation.reference.delete()
+
+    # Also remove orphaned images left by an interrupted generation save.
+    for blob in bucket.list_blobs(prefix=f"users/{uid}/"):
+        blob.delete(ignore_not_found=True)
+
+    # Keep only a one-way owner fingerprint in the fraud/idempotency ledger.
+    # This prevents replaying a consumed Apple transaction after account deletion.
+    transaction_query = db.collection("apple_iap_transactions").where(
+        "uid", "==", uid
+    )
+    for transaction_doc in transaction_query.stream():
+        transaction_doc.reference.update(
+            {
+                "uid": firestore.DELETE_FIELD,
+                "uidHash": deleted_account_fingerprint(uid),
+            }
+        )
+
+    user_ref.delete()
+    firebase_auth.delete_user(uid)
+
+
+@app.delete("/v1/account")
+async def delete_account(authorization: str | None = Header(default=None)):
+    """Delete authenticated account data, then remove its Firebase Auth user."""
+    decoded_token = verify_firebase_user(authorization)
+    uid = decoded_token["uid"]
+    try:
+        await asyncio.to_thread(_delete_firebase_account_data, uid)
+    except Exception as exc:
+        logger.exception("Account deletion failed.")
+        raise HTTPException(
+            status_code=500,
+            detail="Account deletion could not be completed. Please contact support.",
+        ) from exc
+    logger.info("Deleted VYRO account and user content.")
+    return {"success": True}
 
 # ---------------------------------------------------------------------------
 

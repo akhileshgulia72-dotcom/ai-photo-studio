@@ -4,6 +4,7 @@ from apple_iap import (
     APPLE_PRODUCTS,
     AppleIapConfig,
     apple_account_token,
+    deleted_account_fingerprint,
     duplicate_purchase_action,
     validate_transaction_claims,
 )
@@ -67,6 +68,16 @@ class AppleIapPolicyTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             duplicate_purchase_action({"uid": "uid-1"}, "uid-2")
+
+    def test_deleted_account_purchase_ledger_remains_private_and_idempotent(self):
+        fingerprint = deleted_account_fingerprint("uid-1")
+        self.assertNotIn("uid-1", fingerprint)
+        self.assertEqual(
+            duplicate_purchase_action({"uidHash": fingerprint}, "uid-1"),
+            "already_processed",
+        )
+        with self.assertRaises(ValueError):
+            duplicate_purchase_action({"uidHash": fingerprint}, "uid-2")
 
     def test_missing_server_credentials_fail_closed(self):
         with self.assertRaises(RuntimeError):

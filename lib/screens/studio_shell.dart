@@ -1416,6 +1416,42 @@ class _PhotoSelectionScreenState extends State<PhotoSelectionScreen> {
     photo = widget.initialPhoto;
   }
 
+  Future<bool> _confirmPhotoProcessing() async =>
+      await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('About AI photo processing'),
+          content: const Text(
+            'Your selected photo and the chosen template instructions will be '
+            'sent to VYRO’s secure server and OpenAI to create your image. The '
+            'generated result is saved to your VYRO account. Continue only if '
+            'you have permission to share this photo.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                launchUrl(
+                  Uri.parse(
+                    'https://akhileshgulia72-dotcom.github.io/vyro-privacy-policy/',
+                  ),
+                  mode: LaunchMode.externalApplication,
+                );
+              },
+              child: const Text('Privacy policy'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Continue'),
+            ),
+          ],
+        ),
+      ) ??
+      false;
+
   Future<void> pick(ImageSource source) async {
     XFile? picked;
     try {
@@ -1561,6 +1597,8 @@ class _PhotoSelectionScreenState extends State<PhotoSelectionScreen> {
   Future<void> generate() async {
     final selected = photo;
     if (selected == null || busy) return;
+    final acceptedPhotoProcessing = await _confirmPhotoProcessing();
+    if (!acceptedPhotoProcessing || !mounted) return;
     setState(() {
       busy = true;
       error = null;
@@ -2688,12 +2726,55 @@ class ProfileScreen extends StatefulWidget {
 }
 
 class _ProfileScreenState extends State<ProfileScreen> {
+  Future<void> _confirmAndDeleteAccount(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delete your VYRO account?'),
+        content: const Text(
+          'This permanently deletes your account, saved creations, and remaining '
+          'credits. Apple purchase records may be retained in a pseudonymous '
+          'form to prevent duplicate credit grants.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Delete account'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await AuthService.instance.deleteAccountAndData();
+    } catch (_) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Account deletion did not finish. Please retry or contact support.',
+          ),
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
     final isGoogle =
         user?.providerData.any(
           (provider) => provider.providerId == 'google.com',
+        ) ??
+        false;
+    final isApple =
+        user?.providerData.any(
+          (provider) => provider.providerId == 'apple.com',
         ) ??
         false;
     final hasEmail =
@@ -2793,6 +2874,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                               ? (displayName?.isNotEmpty == true
                                     ? displayName!
                                     : 'Google account')
+                              : isApple
+                              ? 'Apple account'
                               : hasEmail
                               ? 'Email account'
                               : 'Guest creator',
@@ -2805,6 +2888,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         Text(
                           isGoogle
                               ? (email ?? 'Google account connected')
+                              : isApple
+                              ? (email ?? 'Apple account connected')
                               : hasEmail
                               ? (email ?? 'Email sign-in connected')
                               : 'Guest session · connect an account to sync your studio',
@@ -2822,12 +2907,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             vertical: 5,
                           ),
                           decoration: BoxDecoration(
-                            color: isGoogle
+                            color: isGoogle || isApple
                                 ? const Color(0x332FCB94)
                                 : const Color(0x33B69BFF),
                             borderRadius: BorderRadius.circular(20),
                             border: Border.all(
-                              color: isGoogle
+                              color: isGoogle || isApple
                                   ? const Color(0x6648D9A8)
                                   : const Color(0x66B69BFF),
                             ),
@@ -2836,11 +2921,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               Icon(
-                                isGoogle
+                                isGoogle || isApple
                                     ? Icons.verified_rounded
                                     : Icons.auto_awesome_rounded,
                                 size: 12,
-                                color: isGoogle
+                                color: isGoogle || isApple
                                     ? const Color(0xFF73E0B5)
                                     : violet,
                               ),
@@ -2848,6 +2933,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                               Text(
                                 isGoogle
                                     ? 'GOOGLE CONNECTED'
+                                    : isApple
+                                    ? 'APPLE CONNECTED'
                                     : hasEmail
                                     ? 'EMAIL CONNECTED'
                                     : 'VYRO CREATOR',
@@ -2885,6 +2972,27 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       const SnackBar(
                         content: Text(
                           'Google Sign-In failed. Please try again.',
+                        ),
+                      ),
+                    );
+                  }
+                },
+              ),
+            if (defaultTargetPlatform == TargetPlatform.iOS && !isApple)
+              _ProfileItem(
+                Icons.apple,
+                'Connect Apple',
+                'Keep your credits and creations attached to your account',
+                onTap: () async {
+                  try {
+                    await AuthService.instance.signInWithApple();
+                    if (mounted) setState(() {});
+                  } catch (_) {
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'Apple Sign-In failed. Please try again.',
                         ),
                       ),
                     );
@@ -2979,6 +3087,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   );
                 }
               },
+            ),
+            _ProfileItem(
+              Icons.delete_forever_outlined,
+              'Delete account',
+              'Permanently delete your account and saved creations',
+              onTap: () => _confirmAndDeleteAccount(context),
             ),
             _ProfileItem(
               Icons.support_agent_outlined,

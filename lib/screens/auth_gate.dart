@@ -1,5 +1,7 @@
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 
 import '../services/auth_service.dart';
 import 'email_auth_screen.dart';
@@ -55,7 +57,7 @@ class _SignInScreenState extends State<SignInScreen> {
   String _friendlyError(Object error) {
     final text = error.toString();
     if (text.contains('canceled') || text.contains('cancelled')) {
-      return 'Google Sign-In was cancelled.';
+      return 'Sign-in was cancelled.';
     }
     if (text.contains('network')) {
       return 'Check your internet connection and try again.';
@@ -167,6 +169,22 @@ class _SignInScreenState extends State<SignInScreen> {
                         ),
                       ),
                       const SizedBox(height: 12),
+                      if (defaultTargetPlatform == TargetPlatform.iOS) ...[
+                        SizedBox(
+                          width: double.infinity,
+                          child: SignInWithAppleButton(
+                            onPressed: _busy
+                                ? null
+                                : () => _run(() async {
+                                    await AuthService.instance
+                                        .signInWithApple();
+                                  }),
+                            height: 52,
+                            style: SignInWithAppleButtonStyle.black,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                      ],
                       SizedBox(
                         width: double.infinity,
                         height: 52,

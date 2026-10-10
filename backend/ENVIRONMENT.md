@@ -52,6 +52,13 @@ token, then grants credits with an atomic Firestore transaction. The
 transaction record is idempotent across retries and app restarts. No Apple
 credential or client-supplied credit amount is trusted by the app.
 
+Sign in with Apple must be enabled for the iOS App ID in the Apple Developer
+portal and as a provider in Firebase Authentication. The Runner target includes
+the Apple Sign-In entitlement; refresh the provisioning profile after enabling
+the capability. `DELETE /v1/account` removes the Firebase user, profile, saved
+generation documents, and Storage files. It retains only a one-way account
+fingerprint in Apple purchase records to prevent transaction replay.
+
 Create these App Store Connect in-app purchases as **consumable** products with
 exact identifiers `com.agdevelops.vyro.credits250` and
 `com.agdevelops.vyro.credits800`. Configure localized storefront pricing in

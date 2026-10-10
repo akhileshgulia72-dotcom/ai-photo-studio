@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:ai_photo_studio/services/ad_unit_config.dart';
 import 'package:ai_photo_studio/services/interstitial_ad_service.dart';
 import 'package:ai_photo_studio/services/rewarded_ad_service.dart';
@@ -7,6 +9,8 @@ import 'package:flutter_test/flutter_test.dart';
 /// AdMob unit ids are `ca-app-pub-<publisher>/<unit>`; application ids use `~`.
 final _unitId = RegExp(r'^ca-app-pub-\d{16}/\d{10}$');
 const vyroPublisher = 'ca-app-pub-7694497723149363';
+const vyroIosAppId = 'ca-app-pub-7694497723149363~7064149443';
+const vyroAndroidAppId = 'ca-app-pub-7694497723149363~1446706318';
 const googleTestPublisher = 'ca-app-pub-3940256099942544';
 
 void main() {
@@ -21,6 +25,18 @@ void main() {
   });
 
   group('production ids are unchanged', () {
+    test(
+      'native app manifests use the configured VYRO AdMob app IDs',
+      () async {
+        final iosPlist = await File('ios/Runner/Info.plist').readAsString();
+        final androidManifest = await File(
+          'android/app/src/main/AndroidManifest.xml',
+        ).readAsString();
+        expect(iosPlist, contains(vyroIosAppId));
+        expect(androidManifest, contains(vyroAndroidAppId));
+      },
+    );
+
     test('Android production ids', () {
       final ids = AdUnitConfig.productionIdsFor(
         platform: TargetPlatform.android,

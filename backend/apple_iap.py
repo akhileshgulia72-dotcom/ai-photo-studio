@@ -24,6 +24,11 @@ def apple_account_token(uid: str) -> str:
     return str(uuid.UUID(bytes=bytes(digest)))
 
 
+def deleted_account_fingerprint(uid: str) -> str:
+    """Pseudonymous account key retained only for IAP replay prevention."""
+    return hashlib.sha256(f"vyro-deleted-account:{uid}".encode()).hexdigest()
+
+
 def validate_transaction_claims(
     transaction: Mapping[str, Any], *, uid: str, bundle_id: str = APPLE_BUNDLE_ID
 ) -> dict[str, Any]:
@@ -59,9 +64,9 @@ def duplicate_purchase_action(existing: Mapping[str, Any] | None, uid: str) -> s
     """Choose the idempotent action for a transaction already in Firestore."""
     if existing is None:
         return "grant"
-    if existing.get("uid") != uid:
-        raise ValueError("Apple transaction was already used by another account.")
-    return "already_processed"
+    if existing.get("uid") == uid or existing.get("uidHash") == deleted_account_fingerprint(uid):
+        return "already_processed"
+    raise ValueError("Apple transaction was already used by another account.")
 
 
 @dataclass(frozen=True)

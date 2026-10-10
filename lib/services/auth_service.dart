@@ -1,9 +1,16 @@
+import 'dart:convert';
+import 'dart:math';
+
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:crypto/crypto.dart';
+import 'package:http/http.dart' as http;
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 
 import '../firebase_options.dart';
+import 'api_config.dart';
 import 'google_sign_in_config.dart';
 
 /// Central authentication service for VYRO.
@@ -220,12 +227,83 @@ class AuthService {
     }
   }
 
+  Future<UserCredential> signInWithApple() async {
+    const charset =
+        '0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._';
+    final random = Random.secure();
+    final rawNonce = List.generate(
+      32,
+      (_) => charset[random.nextInt(charset.length)],
+    ).join();
+    final hashedNonce = sha256.convert(utf8.encode(rawNonce)).toString();
+    try {
+      debugPrint('AuthService: Apple Sign-In stage=authorize');
+      final appleCredential = await SignInWithApple.getAppleIDCredential(
+        scopes: const [AppleIDAuthorizationScopes.email],
+        nonce: hashedNonce,
+      );
+      final idToken = appleCredential.identityToken;
+      if (idToken == null || idToken.isEmpty) {
+        throw StateError('Apple Sign-In did not return an identity token.');
+      }
+      final credential = OAuthProvider(
+        'apple.com',
+      ).credential(idToken: idToken, rawNonce: rawNonce);
+      final user = _firebaseAuth.currentUser;
+      debugPrint(
+        'AuthService: Apple Sign-In stage=${user == null ? 'sign_in' : 'link'}',
+      );
+      if (user != null) return await user.linkWithCredential(credential);
+      return await _firebaseAuth.signInWithCredential(credential);
+    } on SignInWithAppleAuthorizationException catch (error) {
+      debugPrint(
+        'AuthService: Apple Sign-In stage=authorize code=${error.code.name}',
+      );
+      rethrow;
+    } on FirebaseAuthException catch (error) {
+      debugPrint(
+        'AuthService: Apple Sign-In stage=firebase code=${error.code}',
+      );
+      rethrow;
+    } catch (error) {
+      debugPrint(
+        'AuthService: Apple Sign-In stage=authorize '
+        'errorType=${error.runtimeType}',
+      );
+      rethrow;
+    }
+  }
+
   Future<void> signOut() async {
     await _firebaseAuth.signOut();
     try {
       await _googleSignIn.signOut();
     } catch (_) {
       // Firebase is already signed out; Google cache cleanup is best effort.
+    }
+  }
+
+  Future<void> deleteAccountAndData() async {
+    final user = _firebaseAuth.currentUser;
+    if (user == null) throw StateError('No signed-in account is available.');
+    final token = await user.getIdToken(true);
+    if (token == null || token.isEmpty) {
+      throw StateError('Your secure session expired. Please sign in again.');
+    }
+    final response = await http
+        .delete(
+          Uri.parse('$generationApiBaseUrl/v1/account'),
+          headers: {'Authorization': 'Bearer $token'},
+        )
+        .timeout(const Duration(seconds: 60));
+    if (response.statusCode != 200) {
+      throw StateError('Account deletion could not be completed.');
+    }
+    await _firebaseAuth.signOut();
+    try {
+      await _googleSignIn.signOut();
+    } catch (_) {
+      // The Firebase account and user data are already deleted.
     }
   }
 
