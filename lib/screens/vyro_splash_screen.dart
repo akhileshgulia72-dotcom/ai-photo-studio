@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../firebase_options.dart';
 import '../services/auth_service.dart';
+import '../services/iap_purchase_service.dart';
 import '../services/ump_consent_service.dart';
 import 'auth_gate.dart';
 
@@ -45,6 +46,9 @@ class _VyroSplashScreenState extends State<VyroSplashScreen>
       await Firebase.initializeApp(
         options: DefaultFirebaseOptions.currentPlatform,
       );
+      // Subscribe before routing to the home screen so unfinished store
+      // transactions are recovered after an app restart.
+      IapPurchaseService.instance.initialize();
       // UMP refreshes the region-specific consent decision before any ad
       // service is allowed to initialize or load an ad.
       unawaited(UmpConsentService.instance.initialize());

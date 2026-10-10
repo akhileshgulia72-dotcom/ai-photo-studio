@@ -1,16 +1,12 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:ui';
 
 import 'package:ai_photo_studio/screens/studio_shell.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:in_app_purchase/in_app_purchase.dart';
 
 import '../services/account_profile_service.dart';
-import '../services/api_config.dart';
+import '../services/iap_purchase_service.dart';
 import '../widgets/premium_background.dart';
 
 class PremiumScreen extends StatefulWidget {
@@ -21,16 +17,17 @@ class PremiumScreen extends StatefulWidget {
 }
 
 class _PremiumScreenState extends State<PremiumScreen> {
-  static const creatorProductId = 'vyro_creator_150';
-  static const proProductId = 'vyro_pro_500';
-
-  final InAppPurchase _iap = InAppPurchase.instance;
-  StreamSubscription<List<PurchaseDetails>>? _purchaseSubscription;
+  final IapPurchaseService _purchases = IapPurchaseService.instance;
+  StreamSubscription<PurchaseUiEvent>? _purchaseSubscription;
 
   List<ProductDetails> _products = [];
+  int? _credits;
   bool _available = false;
   bool _loading = true;
+  bool _loadingBalance = true;
   bool _purchaseBusy = false;
+  bool _verificationPending = false;
+  String? _storeError;
 
   static const bg = Color(0xFF070711);
   static const text = Color(0xFFF8F5FF);
@@ -41,19 +38,10 @@ class _PremiumScreenState extends State<PremiumScreen> {
   @override
   void initState() {
     super.initState();
-    _purchaseSubscription = _iap.purchaseStream.listen(
-      _onPurchaseUpdates,
-      onError: (Object error, StackTrace stack) {
-        debugPrint('VYRO IAP stream error: $error');
-        if (mounted) {
-          setState(() => _purchaseBusy = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Purchase status could not be read. Try again.')),
-          );
-        }
-      },
-    );
+    _purchases.initialize();
+    _purchaseSubscription = _purchases.events.listen(_onPurchaseEvent);
     _loadProducts();
+    _loadBalance();
   }
 
   @override
@@ -62,130 +50,86 @@ class _PremiumScreenState extends State<PremiumScreen> {
     super.dispose();
   }
 
-  Future<void> _onPurchaseUpdates(List<PurchaseDetails> purchases) async {
-    for (final purchase in purchases) {
-      if (!mounted) return;
-
-      if (purchase.status == PurchaseStatus.pending) {
-        setState(() => _purchaseBusy = true);
-        continue;
+  void _onPurchaseEvent(PurchaseUiEvent event) {
+    if (!mounted) return;
+    setState(() {
+      _purchaseBusy = event.kind == PurchaseEventKind.pending;
+      if (event.kind == PurchaseEventKind.cancelled ||
+          event.kind == PurchaseEventKind.failed) {
+        _verificationPending = false;
       }
-
-      if (purchase.status == PurchaseStatus.error) {
-        if (purchase.pendingCompletePurchase) {
-          await _iap.completePurchase(purchase);
-        }
-        if (!mounted) return;
-        setState(() => _purchaseBusy = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(purchase.error?.message ?? 'Purchase failed.')),
-        );
-        continue;
+      if (event.kind == PurchaseEventKind.verificationPending) {
+        _verificationPending = true;
+      } else if (event.kind == PurchaseEventKind.verified) {
+        _verificationPending = false;
+        if (event.balance != null) _credits = event.balance;
       }
-
-      if (purchase.status == PurchaseStatus.purchased ||
-          purchase.status == PurchaseStatus.restored) {
-        setState(() => _purchaseBusy = true);
-        try {
-          await _verifyAndDeliver(purchase);
-          if (purchase.pendingCompletePurchase) {
-            await _iap.completePurchase(purchase);
-          }
-          await AccountProfileService.instance.refresh(forceTokenRefresh: true);
-          if (!mounted) return;
-          setState(() => _purchaseBusy = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Purchase verified and credits added.')),
-          );
-        } catch (error) {
-          // Never complete an unverified purchase. The store can redeliver it.
-          if (!mounted) return;
-          setState(() => _purchaseBusy = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Purchase verification pending: $error')),
-          );
-        }
-      }
+    });
+    final String? message = switch (event.kind) {
+      PurchaseEventKind.pending => 'Waiting for ${_purchases.storeName}…',
+      PurchaseEventKind.cancelled => 'Purchase cancelled.',
+      PurchaseEventKind.failed =>
+        event.message ?? 'Purchase failed. Please try again.',
+      PurchaseEventKind.verificationPending => event.message,
+      PurchaseEventKind.verified =>
+        event.duplicate
+            ? 'This purchase was already synced to your account.'
+            : '${event.creditsAdded} credits added to your account.',
+      PurchaseEventKind.syncComplete =>
+        'Transaction sync finished. Previously consumed credit packs are kept in your VYRO balance; Apple does not restore consumed packs.',
+    };
+    if (message != null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
     }
   }
 
-  Future<void> _verifyAndDeliver(PurchaseDetails purchase) async {
-    if (defaultTargetPlatform != TargetPlatform.android) {
-      throw StateError(
-        'Apple purchase verification is not configured on the backend yet.',
+  Future<void> _loadBalance() async {
+    try {
+      final profile = await AccountProfileService.instance.refresh();
+      if (!mounted) return;
+      setState(() {
+        _credits = profile.credits;
+        _loadingBalance = false;
+      });
+    } catch (error) {
+      debugPrint(
+        'Credits screen: balance refresh failedType=${error.runtimeType}',
       );
-    }
-
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) throw StateError('Please sign in before purchasing.');
-    final token = await user.getIdToken();
-    if (token == null || token.isEmpty) {
-      throw StateError('Your secure session expired.');
-    }
-
-    final purchaseToken = purchase.verificationData.serverVerificationData;
-    if (purchaseToken.isEmpty) {
-      throw StateError('Google Play purchase token is missing.');
-    }
-
-    final response = await http
-        .post(
-          Uri.parse('$generationApiBaseUrl/v1/iap/google/verify'),
-          headers: {
-            'Authorization': 'Bearer $token',
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-          body: {
-            'productId': purchase.productID,
-            'purchaseToken': purchaseToken,
-          },
-        )
-        .timeout(const Duration(seconds: 30));
-
-    if (response.statusCode != 200) {
-      var message = 'The store could not verify this purchase.';
-      try {
-        final body = jsonDecode(response.body);
-        if (body is Map && body['detail'] != null) {
-          message = body['detail'].toString();
-        }
-      } catch (_) {}
-      throw StateError(message);
+      if (mounted) setState(() => _loadingBalance = false);
     }
   }
 
   Future<void> _loadProducts() async {
+    if (mounted) setState(() => _loading = true);
     try {
-      final available = await _iap.isAvailable();
-      if (!available) {
-        if (!mounted) return;
-        setState(() {
-          _available = false;
-          _loading = false;
-        });
-        return;
-      }
-
-      final response = await _iap.queryProductDetails({
-        creatorProductId,
-        proProductId,
-      });
+      final response = await _purchases.loadProducts();
 
       if (!mounted) return;
       setState(() {
         _available = true;
         _products = response.productDetails;
+        _storeError = response.error == null
+            ? response.notFoundIDs.isEmpty
+                  ? null
+                  : 'Some credit packs are not available in this storefront.'
+            : 'Could not load store products. Please retry.';
         _loading = false;
       });
 
       if (response.notFoundIDs.isNotEmpty) {
-        debugPrint('VYRO IAP products not found: ${response.notFoundIDs}');
+        debugPrint(
+          'IAP: unavailable store product IDs: ${response.notFoundIDs}',
+        );
       }
     } catch (error) {
-      debugPrint('VYRO IAP product load failed: $error');
+      debugPrint('IAP: product query failedType=${error.runtimeType}');
       if (!mounted) return;
       setState(() {
         _available = false;
+        _storeError =
+            'Could not connect to ${_purchases.storeName}. Please retry.';
         _loading = false;
       });
     }
@@ -199,16 +143,18 @@ class _PremiumScreenState extends State<PremiumScreen> {
   }
 
   Future<void> _buy(ProductDetails product) async {
-    if (_purchaseBusy) return;
+    if (_purchaseBusy || _verificationPending) return;
     try {
       setState(() => _purchaseBusy = true);
-      final started = await _iap.buyNonConsumable(
-        purchaseParam: PurchaseParam(productDetails: product),
-      );
+      final started = await _purchases.buy(product);
       if (!started && mounted) {
         setState(() => _purchaseBusy = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Google Play could not start the purchase.')),
+          SnackBar(
+            content: Text(
+              '${_purchases.storeName} could not start the purchase.',
+            ),
+          ),
         );
       }
       // Entitlements are granted only from purchaseStream after server verification.
@@ -216,16 +162,62 @@ class _PremiumScreenState extends State<PremiumScreen> {
       if (!mounted) return;
       setState(() => _purchaseBusy = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Purchase could not start: $error')),
+        SnackBar(
+          content: Text(
+            '${_purchases.storeName} could not start this purchase.',
+          ),
+        ),
       );
     }
+  }
+
+  Widget _balanceCard() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF17131F).withValues(alpha: .9),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: violet.withValues(alpha: .28)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.toll_rounded, color: Color(0xFFC19EFF)),
+          const SizedBox(width: 12),
+          const Expanded(
+            child: Text(
+              'Current credit balance',
+              style: TextStyle(color: muted, fontSize: 13),
+            ),
+          ),
+          Text(
+            _loadingBalance ? '…' : (_credits?.toString() ?? '—'),
+            style: const TextStyle(
+              color: text,
+              fontSize: 20,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          IconButton(
+            tooltip: 'Refresh balance',
+            onPressed: _loadingBalance
+                ? null
+                : () {
+                    setState(() => _loadingBalance = true);
+                    _loadBalance();
+                  },
+            icon: const Icon(Icons.refresh_rounded, size: 19),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _restorePurchases() async {
     if (_purchaseBusy) return;
     try {
       setState(() => _purchaseBusy = true);
-      await _iap.restorePurchases();
+      await _purchases.recoverTransactions();
+      await _loadBalance();
     } catch (error) {
       if (!mounted) return;
       setState(() => _purchaseBusy = false);
@@ -237,8 +229,8 @@ class _PremiumScreenState extends State<PremiumScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final creator = _find(creatorProductId);
-    final pro = _find(proProductId);
+    final creator = _find(_purchases.creatorProductId);
+    final pro = _find(_purchases.proProductId);
 
     return Scaffold(
       backgroundColor: bg,
@@ -256,30 +248,19 @@ class _PremiumScreenState extends State<PremiumScreen> {
           Positioned(
             top: -150,
             right: -120,
-            child: _GlowOrb(
-              size: 360,
-              color: violet.withValues(alpha: .24),
-            ),
+            child: _GlowOrb(size: 360, color: violet.withValues(alpha: .24)),
           ),
 
           Positioned(
             top: 420,
             left: -180,
-            child: _GlowOrb(
-              size: 350,
-              color: pink.withValues(alpha: .10),
-            ),
+            child: _GlowOrb(size: 350, color: pink.withValues(alpha: .10)),
           ),
 
           SafeArea(
             child: ListView(
               physics: const BouncingScrollPhysics(),
-              padding: const EdgeInsets.fromLTRB(
-                20,
-                12,
-                20,
-                45,
-              ),
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 45),
               children: [
                 _header(),
 
@@ -289,12 +270,16 @@ class _PremiumScreenState extends State<PremiumScreen> {
 
                 const SizedBox(height: 28),
 
+                _balanceCard(),
+
+                const SizedBox(height: 20),
+
                 const _BenefitRow(),
 
                 const SizedBox(height: 30),
 
-                const Text(
-                  'Choose your creative power',
+                Text(
+                  'Add AI credits',
                   style: TextStyle(
                     color: text,
                     fontSize: 24,
@@ -306,9 +291,9 @@ class _PremiumScreenState extends State<PremiumScreen> {
 
                 const SizedBox(height: 6),
 
-                const Text(
-                  'One-time purchases. No subscription. '
-                  'Your credits stay in your VYRO account.',
+                Text(
+                  'One-time credit packs billed by ${_purchases.storeName}. '
+                  'Credits are added after the store confirms the purchase.',
                   style: TextStyle(
                     color: muted,
                     fontSize: 13,
@@ -320,44 +305,49 @@ class _PremiumScreenState extends State<PremiumScreen> {
                 const SizedBox(height: 16),
 
                 _PlanCard(
-                  name: 'Creator',
-                  label: 'FOR EVERYDAY CREATORS',
-                  credits: '250',
-                  generations: '25 generations',
-                  price: creator?.price ?? '₹149',
+                  name: _purchases.isApple ? 'VYRO Creator' : 'Creator Credits',
+                  label: 'ONE-TIME CREDIT PACK',
+                  credits: '${_purchases.creatorCredits}',
+                  generations: '${_purchases.creatorCredits ~/ 10} generations',
+                  price:
+                      creator?.price ?? (_loading ? 'Loading…' : 'Unavailable'),
                   icon: Icons.auto_awesome_rounded,
                   features: const [
-                    'Medium AI quality',
-                    'No watermark',
-                    'Premium templates',
-                    'No forced ads',
+                    'Added to your VYRO balance',
+                    'Use for AI photo generations',
+                    'No recurring subscription',
                   ],
                   highlighted: false,
-                  enabled: creator != null && _available && !_purchaseBusy,
-                  buttonText: 'Get Creator',
-                  onPressed:
-                      creator == null ? null : () => _buy(creator),
+                  enabled:
+                      creator != null &&
+                      _available &&
+                      !_purchaseBusy &&
+                      !_verificationPending,
+                  buttonText: 'Buy ${_purchases.creatorCredits} credits',
+                  onPressed: creator == null ? null : () => _buy(creator),
                 ),
 
                 const SizedBox(height: 18),
 
                 _PlanCard(
-                  name: 'Pro',
-                  label: 'FOR SERIOUS CREATORS',
-                  credits: '800',
-                  generations: '80 generations',
-                  price: pro?.price ?? '₹399',
+                  name: _purchases.isApple ? 'VYRO Pro Credits' : 'Pro Credits',
+                  label: 'ONE-TIME CREDIT PACK',
+                  credits: '${_purchases.proCredits}',
+                  generations: '${_purchases.proCredits ~/ 10} generations',
+                  price: pro?.price ?? (_loading ? 'Loading…' : 'Unavailable'),
                   icon: Icons.workspace_premium_rounded,
                   features: const [
-                    'High AI quality',
-                    'No watermark',
-                    'High-quality generation',
-                    'Completely ad-free',
-                    'Priority generation',
+                    'Added to your VYRO balance',
+                    'Use for AI photo generations',
+                    'No recurring subscription',
                   ],
                   highlighted: true,
-                  enabled: pro != null && _available && !_purchaseBusy,
-                  buttonText: 'Get Pro',
+                  enabled:
+                      pro != null &&
+                      _available &&
+                      !_purchaseBusy &&
+                      !_verificationPending,
+                  buttonText: 'Buy ${_purchases.proCredits} credits',
                   onPressed: pro == null ? null : () => _buy(pro),
                 ),
 
@@ -369,14 +359,11 @@ class _PremiumScreenState extends State<PremiumScreen> {
 
                 Center(
                   child: TextButton.icon(
-                    onPressed: _loading || _purchaseBusy ? null : _restorePurchases,
-                    icon: const Icon(
-                      Icons.restore_rounded,
-                      size: 18,
-                    ),
-                    label: const Text(
-                      'Recover a previous purchase',
-                    ),
+                    onPressed: _loading || _purchaseBusy
+                        ? null
+                        : _restorePurchases,
+                    icon: const Icon(Icons.restore_rounded, size: 18),
+                    label: const Text('Sync pending store transactions'),
                     style: TextButton.styleFrom(
                       foregroundColor: const Color(0xFFC4A1FF),
                     ),
@@ -387,10 +374,14 @@ class _PremiumScreenState extends State<PremiumScreen> {
 
                 Text(
                   _loading
-                      ? 'Connecting to Google Play…'
+                      ? 'Connecting to ${_purchases.storeName}…'
                       : !_available
-                          ? 'Google Play billing is unavailable on this device.'
-                          : 'Purchases are securely verified before credits are added.',
+                      ? (_storeError ??
+                            '${_purchases.storeName} is unavailable.')
+                      : _verificationPending
+                      ? 'A completed purchase is waiting for secure verification. Use sync to retry.'
+                      : (_storeError ??
+                            'Purchases are verified by VYRO before credits are added.'),
                   textAlign: TextAlign.center,
                   style: const TextStyle(
                     color: Color(0xFF777286),
@@ -400,10 +391,17 @@ class _PremiumScreenState extends State<PremiumScreen> {
                   ),
                 ),
 
+                if (_storeError != null && !_loading)
+                  TextButton.icon(
+                    onPressed: _loadProducts,
+                    icon: const Icon(Icons.refresh_rounded),
+                    label: const Text('Retry store connection'),
+                  ),
+
                 const SizedBox(height: 12),
 
                 const Text(
-                  'Each generation costs 10 credits.',
+                  'Consumed credit packs are not restored by the store. Your verified balance is saved to your VYRO account.',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     color: Color(0xFF625D70),
@@ -451,21 +449,13 @@ class _PremiumScreenState extends State<PremiumScreen> {
         const SizedBox(width: 8),
 
         Container(
-          padding: const EdgeInsets.symmetric(
-            horizontal: 10,
-            vertical: 5,
-          ),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
           decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              colors: [
-                violet,
-                pink,
-              ],
-            ),
+            gradient: const LinearGradient(colors: [violet, pink]),
             borderRadius: BorderRadius.circular(100),
           ),
           child: const Text(
-            'PRO',
+            'CREDITS',
             style: TextStyle(
               color: Colors.white,
               fontSize: 10,
@@ -479,25 +469,16 @@ class _PremiumScreenState extends State<PremiumScreen> {
         const Spacer(),
 
         Container(
-          padding: const EdgeInsets.symmetric(
-            horizontal: 12,
-            vertical: 9,
-          ),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
           decoration: BoxDecoration(
             color: Colors.white.withValues(alpha: .045),
             borderRadius: BorderRadius.circular(100),
-            border: Border.all(
-              color: violet.withValues(alpha: .35),
-            ),
+            border: Border.all(color: violet.withValues(alpha: .35)),
           ),
           child: const Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
-                Icons.auto_awesome_rounded,
-                color: pink,
-                size: 15,
-              ),
+              Icon(Icons.auto_awesome_rounded, color: pink, size: 15),
               SizedBox(width: 6),
               Text(
                 'ONE-TIME',
@@ -542,10 +523,7 @@ class _PremiumScreenState extends State<PremiumScreen> {
               ShaderMask(
                 shaderCallback: (bounds) {
                   return const LinearGradient(
-                    colors: [
-                      Color(0xFFBFA0FF),
-                      Color(0xFFFF8FD9),
-                    ],
+                    colors: [Color(0xFFBFA0FF), Color(0xFFFF8FD9)],
                   ).createShader(bounds);
                 },
                 child: const Text(
@@ -566,8 +544,8 @@ class _PremiumScreenState extends State<PremiumScreen> {
               const SizedBox(
                 width: 290,
                 child: Text(
-                  'Unlock more credits, cleaner exports '
-                  'and a more powerful VYRO experience.',
+                  'Pick up credits for more AI photo generations. '
+                  'Your current balance stays with your account.',
                   style: TextStyle(
                     color: Color(0xFFBDB7CC),
                     fontSize: 14,
@@ -614,32 +592,19 @@ class _PremiumScreenState extends State<PremiumScreen> {
             right: 15,
             bottom: 2,
             child: Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 11,
-                vertical: 8,
-              ),
+              padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
               decoration: BoxDecoration(
                 gradient: const LinearGradient(
-                  colors: [
-                    Color(0xFFE45AD1),
-                    Color(0xFF805AFF),
-                  ],
+                  colors: [Color(0xFFE45AD1), Color(0xFF805AFF)],
                 ),
                 borderRadius: BorderRadius.circular(13),
                 boxShadow: [
-                  BoxShadow(
-                    color: pink.withValues(alpha: .35),
-                    blurRadius: 20,
-                  ),
+                  BoxShadow(color: pink.withValues(alpha: .35), blurRadius: 20),
                 ],
               ),
               child: const Row(
                 children: [
-                  Icon(
-                    Icons.bolt_rounded,
-                    color: Colors.white,
-                    size: 17,
-                  ),
+                  Icon(Icons.bolt_rounded, color: Colors.white, size: 17),
                   SizedBox(width: 5),
                   Text(
                     'AI POWERED',
@@ -664,20 +629,13 @@ class _PremiumScreenState extends State<PremiumScreen> {
     return ClipRRect(
       borderRadius: BorderRadius.circular(22),
       child: BackdropFilter(
-        filter: ImageFilter.blur(
-          sigmaX: 18,
-          sigmaY: 18,
-        ),
+        filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
         child: Container(
-          padding: const EdgeInsets.symmetric(
-            vertical: 17,
-          ),
+          padding: const EdgeInsets.symmetric(vertical: 17),
           decoration: BoxDecoration(
             color: Colors.white.withValues(alpha: .045),
             borderRadius: BorderRadius.circular(22),
-            border: Border.all(
-              color: Colors.white.withValues(alpha: .09),
-            ),
+            border: Border.all(color: Colors.white.withValues(alpha: .09)),
           ),
           child: const Row(
             children: [
@@ -759,30 +717,16 @@ class _PlanCard extends StatelessWidget {
       child: ClipRRect(
         borderRadius: BorderRadius.circular(30),
         child: BackdropFilter(
-          filter: ImageFilter.blur(
-            sigmaX: 20,
-            sigmaY: 20,
-          ),
+          filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
           child: Container(
-            padding: const EdgeInsets.fromLTRB(
-              20,
-              20,
-              20,
-              18,
-            ),
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 18),
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
                 colors: highlighted
-                    ? [
-                        const Color(0xFF261838),
-                        const Color(0xFF110E1C),
-                      ]
-                    : [
-                        const Color(0xFF191729),
-                        const Color(0xFF0F0E19),
-                      ],
+                    ? [const Color(0xFF261838), const Color(0xFF110E1C)]
+                    : [const Color(0xFF191729), const Color(0xFF0F0E19)],
               ),
               borderRadius: BorderRadius.circular(30),
               border: Border.all(
@@ -797,17 +741,13 @@ class _PlanCard extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    _PlanIcon(
-                      icon: icon,
-                      highlighted: highlighted,
-                    ),
+                    _PlanIcon(icon: icon, highlighted: highlighted),
 
                     const SizedBox(width: 13),
 
                     Expanded(
                       child: Column(
-                        crossAxisAlignment:
-                            CrossAxisAlignment.start,
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
                             label,
@@ -844,13 +784,9 @@ class _PlanCard extends StatelessWidget {
                         ),
                         decoration: BoxDecoration(
                           gradient: const LinearGradient(
-                            colors: [
-                              pink,
-                              violet,
-                            ],
+                            colors: [pink, violet],
                           ),
-                          borderRadius:
-                              BorderRadius.circular(100),
+                          borderRadius: BorderRadius.circular(100),
                         ),
                         child: const Text(
                           'BEST VALUE',
@@ -869,21 +805,14 @@ class _PlanCard extends StatelessWidget {
                 const SizedBox(height: 20),
 
                 Row(
-                  crossAxisAlignment:
-                      CrossAxisAlignment.end,
+                  crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
                     ShaderMask(
                       shaderCallback: (bounds) {
                         return LinearGradient(
                           colors: highlighted
-                              ? const [
-                                  Color(0xFFFFA0DE),
-                                  Color(0xFFB38AFF),
-                                ]
-                              : const [
-                                  Colors.white,
-                                  Color(0xFFD9D0F0),
-                                ],
+                              ? const [Color(0xFFFFA0DE), Color(0xFFB38AFF)]
+                              : const [Colors.white, Color(0xFFD9D0F0)],
                         ).createShader(bounds);
                       },
                       child: Text(
@@ -920,9 +849,7 @@ class _PlanCard extends StatelessWidget {
                     Text(
                       price,
                       style: TextStyle(
-                        color: highlighted
-                            ? const Color(0xFFFFA1DE)
-                            : text,
+                        color: highlighted ? const Color(0xFFFFA1DE) : text,
                         fontSize: 24,
                         fontWeight: FontWeight.w900,
                         letterSpacing: -.6,
@@ -940,11 +867,8 @@ class _PlanCard extends StatelessWidget {
                     vertical: 6,
                   ),
                   decoration: BoxDecoration(
-                    color: Colors.white.withValues(
-                      alpha: .055,
-                    ),
-                    borderRadius:
-                        BorderRadius.circular(100),
+                    color: Colors.white.withValues(alpha: .055),
+                    borderRadius: BorderRadius.circular(100),
                   ),
                   child: Text(
                     generations,
@@ -959,18 +883,13 @@ class _PlanCard extends StatelessWidget {
 
                 const SizedBox(height: 17),
 
-                Divider(
-                  color: Colors.white.withValues(alpha: .08),
-                  height: 1,
-                ),
+                Divider(color: Colors.white.withValues(alpha: .08), height: 1),
 
                 const SizedBox(height: 15),
 
                 for (final feature in features)
                   Padding(
-                    padding: const EdgeInsets.only(
-                      bottom: 11,
-                    ),
+                    padding: const EdgeInsets.only(bottom: 11),
                     child: Row(
                       children: [
                         Container(
@@ -985,9 +904,7 @@ class _PlanCard extends StatelessWidget {
                           child: Icon(
                             Icons.check_rounded,
                             size: 13,
-                            color: highlighted
-                                ? pink
-                                : const Color(0xFFB99BFF),
+                            color: highlighted ? pink : const Color(0xFFB99BFF),
                           ),
                         ),
 
@@ -1017,25 +934,19 @@ class _PlanCard extends StatelessWidget {
                     decoration: BoxDecoration(
                       gradient: highlighted
                           ? const LinearGradient(
-                              colors: [
-                                Color(0xFFFF9BDD),
-                                Color(0xFFA778FF),
-                              ],
+                              colors: [Color(0xFFFF9BDD), Color(0xFFA778FF)],
                             )
                           : LinearGradient(
                               colors: [
                                 violet.withValues(alpha: .28),
-                                const Color(0xFF5B4C7F)
-                                    .withValues(alpha: .35),
+                                const Color(0xFF5B4C7F).withValues(alpha: .35),
                               ],
                             ),
                       borderRadius: BorderRadius.circular(18),
                       boxShadow: highlighted
                           ? [
                               BoxShadow(
-                                color: pink.withValues(
-                                  alpha: .22,
-                                ),
+                                color: pink.withValues(alpha: .22),
                                 blurRadius: 24,
                                 spreadRadius: -5,
                               ),
@@ -1045,26 +956,20 @@ class _PlanCard extends StatelessWidget {
                     child: FilledButton(
                       onPressed: enabled ? onPressed : null,
                       style: FilledButton.styleFrom(
-                        backgroundColor:
-                            Colors.transparent,
-                        disabledBackgroundColor:
-                            Colors.transparent,
+                        backgroundColor: Colors.transparent,
+                        disabledBackgroundColor: Colors.transparent,
                         shadowColor: Colors.transparent,
                         shape: RoundedRectangleBorder(
-                          borderRadius:
-                              BorderRadius.circular(18),
+                          borderRadius: BorderRadius.circular(18),
                         ),
                       ),
                       child: Row(
-                        mainAxisAlignment:
-                            MainAxisAlignment.center,
+                        mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Icon(
                             highlighted
-                                ? Icons
-                                    .workspace_premium_rounded
-                                : Icons
-                                    .auto_awesome_rounded,
+                                ? Icons.workspace_premium_rounded
+                                : Icons.auto_awesome_rounded,
                             size: 19,
                             color: highlighted
                                 ? const Color(0xFF1A1020)
@@ -1072,9 +977,7 @@ class _PlanCard extends StatelessWidget {
                           ),
                           const SizedBox(width: 8),
                           Text(
-                            enabled
-                                ? buttonText
-                                : 'Unavailable',
+                            enabled ? buttonText : 'Unavailable',
                             style: TextStyle(
                               color: highlighted
                                   ? const Color(0xFF1A1020)
@@ -1146,10 +1049,7 @@ class _ArtworkCard extends StatelessWidget {
                 return Container(
                   decoration: const BoxDecoration(
                     gradient: LinearGradient(
-                      colors: [
-                        Color(0xFF3B2761),
-                        Color(0xFF13101D),
-                      ],
+                      colors: [Color(0xFF3B2761), Color(0xFF13101D)],
                     ),
                   ),
                   child: const Icon(
@@ -1167,9 +1067,7 @@ class _ArtworkCard extends StatelessWidget {
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
                   colors: [
-                    Colors.white.withValues(
-                      alpha: .13 * opacity,
-                    ),
+                    Colors.white.withValues(alpha: .13 * opacity),
                     Colors.transparent,
                     Colors.black.withValues(alpha: .45),
                   ],
@@ -1181,9 +1079,7 @@ class _ArtworkCard extends StatelessWidget {
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(24),
                 border: Border.all(
-                  color: Colors.white.withValues(
-                    alpha: .25 * opacity,
-                  ),
+                  color: Colors.white.withValues(alpha: .25 * opacity),
                   width: 1,
                 ),
               ),
@@ -1196,10 +1092,7 @@ class _ArtworkCard extends StatelessWidget {
 }
 
 class _PlanIcon extends StatelessWidget {
-  const _PlanIcon({
-    required this.icon,
-    required this.highlighted,
-  });
+  const _PlanIcon({required this.icon, required this.highlighted});
 
   final IconData icon;
   final bool highlighted;
@@ -1213,19 +1106,12 @@ class _PlanIcon extends StatelessWidget {
         borderRadius: BorderRadius.circular(16),
         gradient: LinearGradient(
           colors: highlighted
-              ? const [
-                  Color(0xFFFF8FDB),
-                  Color(0xFF9D75FF),
-                ]
-              : const [
-                  Color(0xFF704E9F),
-                  Color(0xFF33274C),
-                ],
+              ? const [Color(0xFFFF8FDB), Color(0xFF9D75FF)]
+              : const [Color(0xFF704E9F), Color(0xFF33274C)],
         ),
         boxShadow: [
           BoxShadow(
-            color: (highlighted ? pink : violet)
-                .withValues(alpha: .23),
+            color: (highlighted ? pink : violet).withValues(alpha: .23),
             blurRadius: 18,
             spreadRadius: -5,
           ),
@@ -1233,9 +1119,7 @@ class _PlanIcon extends StatelessWidget {
       ),
       child: Icon(
         icon,
-        color: highlighted
-            ? const Color(0xFF25132A)
-            : Colors.white,
+        color: highlighted ? const Color(0xFF25132A) : Colors.white,
         size: 24,
       ),
     );
@@ -1251,25 +1135,25 @@ class _BenefitRow extends StatelessWidget {
       children: [
         Expanded(
           child: _Benefit(
-            icon: Icons.image_outlined,
-            title: 'Premium',
-            subtitle: 'Templates',
+            icon: Icons.add_card_rounded,
+            title: 'Credit',
+            subtitle: 'Packs',
           ),
         ),
         SizedBox(width: 8),
         Expanded(
           child: _Benefit(
-            icon: Icons.no_photography_outlined,
-            title: 'No',
-            subtitle: 'Watermark',
+            icon: Icons.verified_user_outlined,
+            title: 'Verified',
+            subtitle: 'Purchases',
           ),
         ),
         SizedBox(width: 8),
         Expanded(
           child: _Benefit(
-            icon: Icons.bolt_rounded,
-            title: 'Fast',
-            subtitle: 'Creation',
+            icon: Icons.account_balance_wallet_outlined,
+            title: 'Saved',
+            subtitle: 'To account',
           ),
         ),
       ],
@@ -1293,29 +1177,17 @@ class _Benefit extends StatelessWidget {
     return ClipRRect(
       borderRadius: BorderRadius.circular(17),
       child: BackdropFilter(
-        filter: ImageFilter.blur(
-          sigmaX: 14,
-          sigmaY: 14,
-        ),
+        filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
         child: Container(
-          padding: const EdgeInsets.symmetric(
-            vertical: 12,
-            horizontal: 7,
-          ),
+          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 7),
           decoration: BoxDecoration(
             color: Colors.white.withValues(alpha: .045),
             borderRadius: BorderRadius.circular(17),
-            border: Border.all(
-              color: Colors.white.withValues(alpha: .075),
-            ),
+            border: Border.all(color: Colors.white.withValues(alpha: .075)),
           ),
           child: Column(
             children: [
-              Icon(
-                icon,
-                color: const Color(0xFFC19EFF),
-                size: 21,
-              ),
+              Icon(icon, color: const Color(0xFFC19EFF), size: 21),
               const SizedBox(height: 5),
               Text(
                 title,
@@ -1343,10 +1215,7 @@ class _Benefit extends StatelessWidget {
 }
 
 class _TrustItem extends StatelessWidget {
-  const _TrustItem({
-    required this.icon,
-    required this.label,
-  });
+  const _TrustItem({required this.icon, required this.label});
 
   final IconData icon;
   final String label;
@@ -1356,11 +1225,7 @@ class _TrustItem extends StatelessWidget {
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        Icon(
-          icon,
-          color: const Color(0xFFB993FF),
-          size: 18,
-        ),
+        Icon(icon, color: const Color(0xFFB993FF), size: 18),
         const SizedBox(width: 6),
         Text(
           label,
@@ -1390,10 +1255,7 @@ class _Divider extends StatelessWidget {
 }
 
 class _CircleButton extends StatelessWidget {
-  const _CircleButton({
-    required this.icon,
-    required this.onTap,
-  });
+  const _CircleButton({required this.icon, required this.onTap});
 
   final IconData icon;
   final VoidCallback onTap;
@@ -1409,11 +1271,7 @@ class _CircleButton extends StatelessWidget {
         child: SizedBox(
           width: 48,
           height: 48,
-          child: Icon(
-            icon,
-            color: Colors.white,
-            size: 24,
-          ),
+          child: Icon(icon, color: Colors.white, size: 24),
         ),
       ),
     );
@@ -1421,10 +1279,7 @@ class _CircleButton extends StatelessWidget {
 }
 
 class _GlowOrb extends StatelessWidget {
-  const _GlowOrb({
-    required this.size,
-    required this.color,
-  });
+  const _GlowOrb({required this.size, required this.color});
 
   final double size;
   final Color color;
@@ -1437,12 +1292,7 @@ class _GlowOrb extends StatelessWidget {
         height: size,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          gradient: RadialGradient(
-            colors: [
-              color,
-              color.withValues(alpha: 0),
-            ],
-          ),
+          gradient: RadialGradient(colors: [color, color.withValues(alpha: 0)]),
         ),
       ),
     );

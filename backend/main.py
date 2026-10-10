@@ -54,6 +54,10 @@ from __future__ import annotations
 
 import base64
 
+import asyncio
+
+import hashlib
+
 import io
 
 import logging
@@ -78,6 +82,8 @@ from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadF
 
 from fastapi.responses import FileResponse, Response
 
+from pydantic import BaseModel, Field
+
 from PIL import Image, ImageDraw, ImageFilter
 
 import firebase_admin
@@ -85,6 +91,13 @@ import firebase_admin
 from firebase_admin import auth as firebase_auth
 
 from firebase_admin import credentials, firestore, storage
+
+from apple_iap import (
+    AppleIapConfig,
+    duplicate_purchase_action,
+    validate_transaction_claims,
+    verify_apple_transaction,
+)
 
 load_dotenv()
 
@@ -1607,6 +1620,246 @@ async def get_profile(
 def _get_or_create_profile_ref(uid: str):
 
     return db.collection("users").document(uid)
+
+
+class ApplePurchaseVerificationRequest(BaseModel):
+
+    signedTransactionJws: str = Field(min_length=1, max_length=32768)
+
+
+@app.post("/v1/iap/apple/verify")
+async def verify_apple_purchase(
+    payload: ApplePurchaseVerificationRequest,
+    authorization: str | None = Header(default=None),
+):
+
+    """Verify an Apple-signed transaction and grant its credit pack once."""
+
+    decoded_token = verify_firebase_user(authorization)
+
+    uid = decoded_token["uid"]
+
+    try:
+
+        config = AppleIapConfig.from_environment(os.environ)
+
+    except (RuntimeError, ValueError) as exc:
+
+        logger.error("Apple IAP verification configuration is incomplete.")
+
+        raise HTTPException(
+
+            status_code=503,
+
+            detail="Apple purchase verification is not configured. Please try again later.",
+
+        ) from exc
+
+    try:
+
+        verified_claims, environment = await asyncio.to_thread(
+
+            verify_apple_transaction,
+
+            payload.signedTransactionJws,
+
+            config,
+
+        )
+
+        grant = validate_transaction_claims(
+
+            verified_claims,
+
+            uid=uid,
+
+            bundle_id=config.bundle_id,
+
+        )
+
+    except ValueError as exc:
+
+        logger.warning("Apple IAP rejected a verified transaction: %s", exc)
+
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    except RuntimeError as exc:
+
+        logger.warning("Apple IAP could not confirm transaction status.")
+
+        raise HTTPException(
+
+            status_code=503,
+
+            detail="Apple could not confirm the transaction status. Please retry.",
+
+        ) from exc
+
+    is_sandbox = environment.lower() == "sandbox"
+
+    if is_sandbox and uid not in config.sandbox_uid_allowlist:
+
+        logger.warning("Apple sandbox purchase rejected for a non-allowlisted account.")
+
+        raise HTTPException(
+
+            status_code=403,
+
+            detail="Sandbox purchases are not enabled for this account.",
+
+        )
+
+    grant["environment"] = environment
+
+    purchase_key = hashlib.sha256(grant["transaction_id"].encode("utf-8")).hexdigest()
+
+    purchase_ref = db.collection("apple_iap_transactions").document(purchase_key)
+
+    user_ref = _get_or_create_profile_ref(uid)
+
+    purchase_transaction = db.transaction()
+
+    @firestore.transactional
+
+    def apply_credit_grant(transaction):
+
+        purchase_snapshot = purchase_ref.get(transaction=transaction)
+
+        purchase_data = purchase_snapshot.to_dict() if purchase_snapshot.exists else None
+
+        action = duplicate_purchase_action(purchase_data, uid)
+
+        user_snapshot = user_ref.get(transaction=transaction)
+
+        user_data = user_snapshot.to_dict() if user_snapshot.exists else {}
+
+        current_credits = int(user_data.get("credits", 5 if not user_snapshot.exists else 0))
+
+        if action == "already_processed":
+
+            return {
+
+                "duplicate": True,
+
+                "credits": current_credits,
+
+                "credits_added": 0,
+
+            }
+
+        credits_added = int(grant["credits"])
+
+        updated_credits = current_credits + credits_added
+
+        profile_values = {
+
+            "credits": updated_credits,
+
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+
+        }
+
+        if user_snapshot.exists:
+
+            transaction.update(user_ref, profile_values)
+
+        else:
+
+            profile_values.update(
+
+                {
+
+                    "plan": "free",
+
+                    "totalGenerations": 0,
+
+                    "createdAt": firestore.SERVER_TIMESTAMP,
+
+                }
+
+            )
+
+            transaction.create(user_ref, profile_values)
+
+        transaction.create(
+
+            purchase_ref,
+
+            {
+
+                "uid": uid,
+
+                "transactionIdHash": purchase_key,
+
+                "productId": grant["product_id"],
+
+                "credits": credits_added,
+
+                "environment": environment,
+
+                "createdAt": firestore.SERVER_TIMESTAMP,
+
+            },
+
+        )
+
+        return {
+
+            "duplicate": False,
+
+            "credits": updated_credits,
+
+            "credits_added": credits_added,
+
+        }
+
+    try:
+
+        result = apply_credit_grant(purchase_transaction)
+
+    except ValueError as exc:
+
+        logger.warning("Apple IAP transaction ownership conflict.")
+
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    except Exception as exc:
+
+        logger.exception("Apple IAP credit grant failed.")
+
+        raise HTTPException(
+
+            status_code=500,
+
+            detail="Verified purchase could not be added yet. Please retry.",
+
+        ) from exc
+
+    logger.info(
+
+        "Apple IAP processed | transaction=%s | product=%s | duplicate=%s",
+
+        purchase_key[:12],
+
+        grant["product_id"],
+
+        result["duplicate"],
+
+    )
+
+    return {
+
+        "success": True,
+
+        "duplicate": result["duplicate"],
+
+        "creditsAdded": result["credits_added"],
+
+        "credits": result["credits"],
+
+        "productId": grant["product_id"],
+
+    }
 
 def reserve_generation_credits(uid: str, request_id: str) -> None:
 

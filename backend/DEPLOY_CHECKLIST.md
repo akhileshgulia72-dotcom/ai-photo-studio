@@ -24,3 +24,10 @@
 16. Test app restart during an IAP purchase; purchaseStream must redeliver and backend must remain idempotent.
 17. Test account switching; a purchase token must never be credited to a different Firebase UID.
 18. Keep `ENABLE_TEST_OUTPUT=false` in production.
+19. Set the Apple App Store Server API key and root-certificate environment
+    variables in Cloud Run Secret Manager/config before enabling Apple credit
+    purchases. Add only controlled Firebase test UIDs to
+    `APPLE_IAP_SANDBOX_UID_ALLOWLIST` for TestFlight sandbox testing.
+20. Create both Apple products as consumables with the exact IDs documented in
+    `ENVIRONMENT.md`, complete Paid Apps Agreement/tax/banking setup, and test
+    each SKU with a sandbox tester.

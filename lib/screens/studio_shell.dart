@@ -29,6 +29,7 @@ import '../services/ad_diagnostics.dart';
 import '../services/gallery_save_service.dart';
 
 import 'premium_screen.dart';
+import 'email_auth_screen.dart';
 import '../widgets/premium_background.dart';
 import 'photo_tools_screen.dart';
 
@@ -2690,7 +2691,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
   @override
   Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
-    final isGoogle = user != null && !user.isAnonymous;
+    final isGoogle =
+        user?.providerData.any(
+          (provider) => provider.providerId == 'google.com',
+        ) ??
+        false;
+    final hasEmail =
+        user?.providerData.any(
+          (provider) => provider.providerId == 'password',
+        ) ??
+        false;
     final displayName = user?.displayName?.trim();
     final email = user?.email;
 
@@ -2783,6 +2793,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                               ? (displayName?.isNotEmpty == true
                                     ? displayName!
                                     : 'Google account')
+                              : hasEmail
+                              ? 'Email account'
                               : 'Guest creator',
                           style: const TextStyle(
                             fontWeight: FontWeight.w800,
@@ -2793,7 +2805,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         Text(
                           isGoogle
                               ? (email ?? 'Google account connected')
-                              : 'Guest session Â· connect Google to sync your studio',
+                              : hasEmail
+                              ? (email ?? 'Email sign-in connected')
+                              : 'Guest session · connect an account to sync your studio',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
@@ -2832,7 +2846,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
                               ),
                               const SizedBox(width: 5),
                               Text(
-                                isGoogle ? 'GOOGLE CONNECTED' : 'VYRO CREATOR',
+                                isGoogle
+                                    ? 'GOOGLE CONNECTED'
+                                    : hasEmail
+                                    ? 'EMAIL CONNECTED'
+                                    : 'VYRO CREATOR',
                                 style: const TextStyle(
                                   fontSize: 9,
                                   fontWeight: FontWeight.w800,
@@ -2872,6 +2890,22 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     );
                   }
                 },
+              ),
+            if (user != null && !hasEmail)
+              _ProfileItem(
+                Icons.email_outlined,
+                'Add email and password',
+                'Keep this same account, credits, and creations',
+                onTap: () =>
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute<void>(
+                        builder: (_) =>
+                            const EmailAuthScreen(linkCurrentAccount: true),
+                      ),
+                    ).then((_) {
+                      if (mounted) setState(() {});
+                    }),
               ),
             _ProfileItem(
               Icons.auto_awesome,

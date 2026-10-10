@@ -72,6 +72,83 @@ class AuthService {
     return user;
   }
 
+  Future<UserCredential> signInWithEmail({
+    required String email,
+    required String password,
+  }) async {
+    try {
+      debugPrint('AuthService: Email auth stage=sign_in');
+      final result = await _firebaseAuth.signInWithEmailAndPassword(
+        email: email.trim(),
+        password: password,
+      );
+      debugPrint('AuthService: Email auth stage=sign_in result=success');
+      return result;
+    } on FirebaseAuthException catch (error) {
+      debugPrint('AuthService: Email auth stage=sign_in code=${error.code}');
+      rethrow;
+    } catch (error) {
+      debugPrint(
+        'AuthService: Email auth stage=sign_in errorType=${error.runtimeType}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Creates an email account or links it to the current Firebase user.
+  /// Linking preserves the existing anonymous/Google UID and its backend data.
+  Future<UserCredential> createEmailAccount({
+    required String email,
+    required String password,
+  }) async {
+    final credential = EmailAuthProvider.credential(
+      email: email.trim(),
+      password: password,
+    );
+    try {
+      debugPrint('AuthService: Email auth stage=create_or_link');
+      final existingUser = _firebaseAuth.currentUser;
+      final result = existingUser == null
+          ? await _firebaseAuth.createUserWithEmailAndPassword(
+              email: email.trim(),
+              password: password,
+            )
+          : await existingUser.linkWithCredential(credential);
+      debugPrint('AuthService: Email auth stage=create_or_link result=success');
+      return result;
+    } on FirebaseAuthException catch (error) {
+      debugPrint(
+        'AuthService: Email auth stage=create_or_link code=${error.code}',
+      );
+      rethrow;
+    } catch (error) {
+      debugPrint(
+        'AuthService: Email auth stage=create_or_link '
+        'errorType=${error.runtimeType}',
+      );
+      rethrow;
+    }
+  }
+
+  Future<void> sendPasswordResetEmail(String email) async {
+    try {
+      debugPrint('AuthService: Email auth stage=password_reset');
+      await _firebaseAuth.sendPasswordResetEmail(email: email.trim());
+      debugPrint('AuthService: Email auth stage=password_reset result=sent');
+    } on FirebaseAuthException catch (error) {
+      debugPrint(
+        'AuthService: Email auth stage=password_reset code=${error.code}',
+      );
+      rethrow;
+    } catch (error) {
+      debugPrint(
+        'AuthService: Email auth stage=password_reset '
+        'errorType=${error.runtimeType}',
+      );
+      rethrow;
+    }
+  }
+
   Future<UserCredential> signInWithGoogle() async {
     var stage = 'initialize';
     try {
@@ -102,15 +179,18 @@ class AuthService {
           ? 'firebase_link_credential'
           : 'firebase_sign_in_credential';
 
-      if (firebaseUser != null && firebaseUser.isAnonymous) {
+      if (firebaseUser != null) {
         try {
-          // Preserve the anonymous Firebase UID whenever possible.
+          // Preserve the current Firebase UID for both guest upgrades and
+          // authenticated accounts that add Google as another sign-in method.
           return await firebaseUser.linkWithCredential(credential);
         } on FirebaseAuthException catch (error) {
           // Preserve the prior recovery behavior when Google already belongs
-          // to another Firebase user.
-          if (error.code == 'credential-already-in-use' ||
-              error.code == 'provider-already-linked') {
+          // to another Firebase user. Do not silently switch a signed-in
+          // account and risk attaching credits to a different UID.
+          if (firebaseUser.isAnonymous &&
+              (error.code == 'credential-already-in-use' ||
+                  error.code == 'provider-already-linked')) {
             stage = 'firebase_sign_in_existing_credential';
             return await _firebaseAuth.signInWithCredential(credential);
           }

@@ -46,6 +46,12 @@ credit balance. No service-account key belongs in Flutter or the repository.
 Create these exact Play Console products as one-time consumable in-app products:
 `vyro_creator_150` at USD 1.99 and `vyro_pro_500` at USD 4.99. Play may show a
 localized price to users in other countries.
+
+For Apple, see `ENVIRONMENT.md` for the App Store Server API credentials and
+Apple root certificates required by `/v1/iap/apple/verify`. Create the
+consumable products `com.agdevelops.vyro.credits250` and
+`com.agdevelops.vyro.credits800` in App Store Connect. Apple prices are fetched
+from StoreKit and localized by the storefront.
 Store `OPENAI_API_KEY` as a Secret Manager secret and grant this service account
 `roles/secretmanager.secretAccessor` on that secret. Add the secret value in the
 Google Cloud Console; do not place the key in commands, `.env` committed to Git,

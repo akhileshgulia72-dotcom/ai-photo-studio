@@ -28,5 +28,36 @@ AdMob SSV:
 - The backend independently enforces AD_REWARD_CREDITS=5.
 
 Apple IAP:
-The Flutter client deliberately does not complete iOS purchases until a server-side Apple verification path is configured. Do not change that safety behavior.
-For production iOS billing, configure Apple's App Store Server API credentials and Apple root certificates on the backend, then add an /v1/iap/apple/verify endpoint using Apple's official App Store Server Library.
+The backend exposes `/v1/iap/apple/verify` and fails closed until all of the
+following are configured server-side. Store the private key in Secret Manager;
+never put it in Flutter or a committed `.env` file.
+
+- `APPLE_APP_ID`: numeric App Store Connect Apple ID for this app (required for
+  production signed-data verification).
+- `APPLE_IAP_BUNDLE_ID=com.agdevelops.ainotescanner`.
+- `APPLE_IAP_KEY_ID`: key ID for an App Store Connect In-App Purchase key.
+- `APPLE_IAP_ISSUER_ID`: issuer ID shown with that key.
+- `APPLE_IAP_PRIVATE_KEY`: the downloaded `.p8` private key, injected from
+  Secret Manager.
+- `APPLE_ROOT_CERTIFICATES_B64`: comma-separated Base64 DER bytes for Apple's
+  current App Store root certificates from Apple PKI.
+- `APPLE_IAP_SANDBOX_UID_ALLOWLIST`: comma-separated Firebase UIDs allowed to
+  receive sandbox/TestFlight credit grants. Leave empty outside a controlled
+  test. Sandbox transactions are otherwise rejected.
+
+The endpoint verifies the submitted JWS using Apple's Python App Store Server
+Library, looks up and verifies Apple's current transaction status, checks app,
+product, consumable type, revocation, quantity, and the UID-bound app account
+token, then grants credits with an atomic Firestore transaction. The
+transaction record is idempotent across retries and app restarts. No Apple
+credential or client-supplied credit amount is trusted by the app.
+
+Create these App Store Connect in-app purchases as **consumable** products with
+exact identifiers `com.agdevelops.vyro.credits250` and
+`com.agdevelops.vyro.credits800`. Configure localized storefront pricing in
+App Store Connect; the app displays the price returned by StoreKit.
+
+The existing Play product IDs and Android purchase code remain in place. The
+checked-in backend currently does not contain the Google Play verification
+route referenced by the Flutter screen; verify the deployed backend's Android
+route before relying on Play billing from this repository build.
