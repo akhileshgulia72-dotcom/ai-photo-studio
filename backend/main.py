@@ -99,6 +99,16 @@ from apple_iap import (
     validate_transaction_claims,
     verify_apple_transaction,
 )
+from google_play_iap import (
+    ANDROID_PACKAGE_NAME,
+    GooglePlayApiError,
+    consume_play_purchase,
+    duplicate_play_purchase_action,
+    get_play_purchase,
+    play_purchase_key,
+    validate_play_purchase,
+)
+from purchase_policy import PLAY_PRODUCTS, updated_plan
 
 load_dotenv()
 
@@ -1676,6 +1686,161 @@ def _get_or_create_profile_ref(uid: str):
 class ApplePurchaseVerificationRequest(BaseModel):
 
     signedTransactionJws: str = Field(min_length=1, max_length=32768)
+
+
+@app.post("/v1/iap/google/verify")
+async def verify_google_play_purchase(
+    productId: str = Form(..., min_length=1, max_length=200),
+    purchaseToken: str = Form(..., min_length=1, max_length=4096),
+    authorization: str | None = Header(default=None),
+):
+    """Verify a Google Play purchase before granting its plan and credits."""
+    decoded_token = verify_firebase_user(authorization)
+    uid = decoded_token["uid"]
+    if productId not in PLAY_PRODUCTS:
+        raise HTTPException(status_code=400, detail="Unsupported Google Play product.")
+
+    package_name = (
+        os.getenv("ANDROID_PACKAGE_NAME") or ANDROID_PACKAGE_NAME
+    ).strip()
+    try:
+        purchase = await asyncio.to_thread(
+            get_play_purchase, package_name, productId, purchaseToken
+        )
+    except GooglePlayApiError as exc:
+        status_code = 400 if exc.invalid_purchase else 503
+        logger.warning("Google Play purchase lookup failed: %s", exc)
+        raise HTTPException(
+            status_code=status_code,
+            detail=(
+                "Google Play purchase could not be verified."
+                if exc.invalid_purchase
+                else "Google Play verification is temporarily unavailable. Please retry."
+            ),
+        ) from exc
+
+    try:
+        grant = validate_play_purchase(purchase, product_id=productId, uid=uid)
+    except PermissionError as exc:
+        logger.warning("Google Play purchase account binding mismatch.")
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        logger.warning("Google Play rejected an incomplete or invalid purchase.")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    token_key = play_purchase_key(purchaseToken)
+    purchase_ref = db.collection("play_purchases").document(token_key)
+    user_ref = _get_or_create_profile_ref(uid)
+    purchase_transaction = db.transaction()
+
+    @firestore.transactional
+    def apply_credit_grant(transaction):
+        purchase_snapshot = purchase_ref.get(transaction=transaction)
+        purchase_data = purchase_snapshot.to_dict() if purchase_snapshot.exists else None
+        action = duplicate_play_purchase_action(purchase_data, uid)
+        user_snapshot = user_ref.get(transaction=transaction)
+        user_data = user_snapshot.to_dict() if user_snapshot.exists else {}
+        current_credits = int(
+            user_data.get("credits", 5 if not user_snapshot.exists else 0)
+        )
+        if action == "already_processed":
+            return {
+                "duplicate": True,
+                "credits": current_credits,
+                "credits_added": 0,
+                "plan": user_data.get("plan", "free"),
+            }
+
+        credits_added = int(grant["credits"])
+        updated_credits = current_credits + credits_added
+        updated_user_plan = updated_plan(
+            str(user_data.get("plan", "free")), grant["plan"]
+        )
+        profile_values = {
+            "credits": updated_credits,
+            "plan": updated_user_plan,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        }
+        if user_snapshot.exists:
+            transaction.update(user_ref, profile_values)
+        else:
+            profile_values.update(
+                {
+                    "totalGenerations": 0,
+                    "createdAt": firestore.SERVER_TIMESTAMP,
+                }
+            )
+            transaction.create(user_ref, profile_values)
+
+        transaction.create(
+            purchase_ref,
+            {
+                "uidHash": grant["uid_hash"],
+                "purchaseTokenHash": token_key,
+                "productId": productId,
+                "credits": credits_added,
+                "plan": grant["plan"],
+                "purchaseTimeMillis": grant["purchase_time_millis"],
+                "accountBound": grant["account_bound"],
+                "createdAt": firestore.SERVER_TIMESTAMP,
+            },
+        )
+        return {
+            "duplicate": False,
+            "credits": updated_credits,
+            "credits_added": credits_added,
+            "plan": updated_user_plan,
+        }
+
+    try:
+        result = await asyncio.to_thread(apply_credit_grant, purchase_transaction)
+    except PermissionError as exc:
+        logger.warning("Google Play transaction ownership conflict.")
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Google Play credit grant failed.")
+        raise HTTPException(
+            status_code=500,
+            detail="Verified purchase could not be added yet. Please retry.",
+        ) from exc
+
+    # The Flutter client intentionally does not auto-consume before verification.
+    # Consume only after the Firestore grant commits; on a retry, an already
+    # granted transaction still gets consumed if the earlier consume failed.
+    try:
+        if int(purchase.get("consumptionState", 0)) == 0:
+            await asyncio.to_thread(
+                consume_play_purchase, package_name, productId, purchaseToken
+            )
+    except (TypeError, ValueError):
+        logger.error("Google Play returned an invalid consumption state.")
+        raise HTTPException(
+            status_code=503,
+            detail="Purchase processing is pending. Please retry.",
+        )
+    except GooglePlayApiError as exc:
+        logger.warning("Google Play purchase consumption failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Purchase processing is pending. Please retry.",
+        ) from exc
+
+    logger.info(
+        "Google Play purchase processed | purchase=%s | product=%s | "
+        "duplicate=%s | accountBound=%s",
+        token_key[:12],
+        productId,
+        result["duplicate"],
+        grant["account_bound"],
+    )
+    return {
+        "success": True,
+        "productId": productId,
+        "creditsAdded": result["credits_added"],
+        "credits": result["credits"],
+        "plan": result["plan"],
+        "duplicate": result["duplicate"],
+    }
 
 
 @app.post("/v1/iap/apple/verify")

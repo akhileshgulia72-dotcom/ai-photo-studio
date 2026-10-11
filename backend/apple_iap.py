@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping
+
+from cryptography import x509
+from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 
 APPLE_BUNDLE_ID = "com.agdevelops.ainotescanner"
@@ -43,11 +49,20 @@ def validate_transaction_claims(
         raise ValueError("Apple transaction is not a consumable product.")
     if not transaction.get("transactionId"):
         raise ValueError("Apple transaction ID is missing.")
-    if transaction.get("purchaseDate") is None:
+    try:
+        purchase_date = int(transaction.get("purchaseDate"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Apple transaction purchase date is invalid.") from exc
+    if purchase_date <= 0:
         raise ValueError("Apple transaction is not a completed purchase.")
     if transaction.get("revocationDate") is not None:
         raise ValueError("Apple transaction was revoked.")
-    if int(transaction.get("quantity") or 1) != 1:
+    quantity_value = transaction.get("quantity")
+    try:
+        quantity = int(1 if quantity_value is None else quantity_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Apple transaction quantity is invalid.") from exc
+    if quantity != 1:
         raise ValueError("Only one credit pack may be purchased per transaction.")
     token = transaction.get("appAccountToken")
     if not token or str(token).lower() != apple_account_token(uid).lower():
@@ -92,27 +107,71 @@ class AppleIapConfig:
         if missing:
             raise RuntimeError("Apple IAP configuration is incomplete: " + ", ".join(missing))
 
+        app_id_value = environ["APPLE_APP_ID"].strip()
+        if not app_id_value.isascii() or not app_id_value.isdecimal():
+            raise RuntimeError("APPLE_APP_ID must be a positive numeric App Store ID.")
+        app_apple_id = int(app_id_value)
+        if app_apple_id <= 0:
+            raise RuntimeError("APPLE_APP_ID must be a positive numeric App Store ID.")
+
         roots: list[bytes] = []
-        for encoded in environ["APPLE_ROOT_CERTIFICATES_B64"].split(","):
+        encoded_roots = environ["APPLE_ROOT_CERTIFICATES_B64"].split(",")
+        for encoded in encoded_roots:
             value = encoded.strip()
-            if value:
-                roots.append(base64.b64decode(value, validate=True))
+            if not value:
+                raise RuntimeError(
+                    "APPLE_ROOT_CERTIFICATES_B64 contains an empty certificate entry."
+                )
+            try:
+                certificate_bytes = base64.b64decode(value, validate=True)
+                certificate = x509.load_der_x509_certificate(certificate_bytes)
+                constraints = certificate.extensions.get_extension_for_class(
+                    x509.BasicConstraints
+                ).value
+            except (binascii.Error, ValueError, x509.ExtensionNotFound) as exc:
+                raise RuntimeError(
+                    "APPLE_ROOT_CERTIFICATES_B64 must contain Base64-encoded "
+                    "DER X.509 CA certificates."
+                ) from exc
+            if not constraints.ca:
+                raise RuntimeError(
+                    "APPLE_ROOT_CERTIFICATES_B64 may contain only CA certificates."
+                )
+            roots.append(certificate_bytes)
         if not roots:
             raise RuntimeError("No Apple root certificates are configured.")
 
-        key = environ["APPLE_IAP_PRIVATE_KEY"].replace("\\n", "\n").encode("utf-8")
+        key = environ["APPLE_IAP_PRIVATE_KEY"].replace("\\n", "\n").strip().encode("utf-8")
+        try:
+            parsed_key = serialization.load_pem_private_key(key, password=None)
+        except (TypeError, ValueError, UnsupportedAlgorithm) as exc:
+            raise RuntimeError(
+                "APPLE_IAP_PRIVATE_KEY must be a valid PEM-encoded App Store Connect .p8 key."
+            ) from exc
+        if (
+            not isinstance(parsed_key, ec.EllipticCurvePrivateKey)
+            or parsed_key.curve.name != "secp256r1"
+        ):
+            raise RuntimeError(
+                "APPLE_IAP_PRIVATE_KEY must be an App Store Connect P-256 .p8 key."
+            )
+
+        sandbox_uids = frozenset(
+            uid.strip()
+            for uid in environ.get("APPLE_IAP_SANDBOX_UID_ALLOWLIST", "").split(",")
+            if uid.strip()
+        )
+        if "*" in sandbox_uids:
+            raise RuntimeError("APPLE_IAP_SANDBOX_UID_ALLOWLIST cannot contain a wildcard.")
+
         return cls(
-            bundle_id=environ.get("APPLE_IAP_BUNDLE_ID", APPLE_BUNDLE_ID).strip(),
-            app_apple_id=int(environ["APPLE_APP_ID"].strip()),
+            bundle_id=environ.get("APPLE_IAP_BUNDLE_ID", "").strip() or APPLE_BUNDLE_ID,
+            app_apple_id=app_apple_id,
             key_id=environ["APPLE_IAP_KEY_ID"].strip(),
             issuer_id=environ["APPLE_IAP_ISSUER_ID"].strip(),
             private_key=key,
             root_certificates=tuple(roots),
-            sandbox_uid_allowlist=frozenset(
-                uid.strip()
-                for uid in environ.get("APPLE_IAP_SANDBOX_UID_ALLOWLIST", "").split(",")
-                if uid.strip()
-            ),
+            sandbox_uid_allowlist=sandbox_uids,
         )
 
 

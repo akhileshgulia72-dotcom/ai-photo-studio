@@ -126,9 +126,14 @@ class IapPurchaseService {
       );
     }
 
-    // Keep the existing Google Play product ids and purchase API behavior.
-    return _iap.buyNonConsumable(
-      purchaseParam: PurchaseParam(productDetails: product),
+    // The Play SKUs are credit packs. Defer consumption until the backend has
+    // verified the token and atomically granted credits.
+    return _iap.buyConsumable(
+      purchaseParam: PurchaseParam(
+        productDetails: product,
+        applicationUserName: playAccountBinding(user.uid),
+      ),
+      autoConsume: false,
     );
   }
 
@@ -137,7 +142,9 @@ class IapPurchaseService {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) throw StateError('Sign in to sync your purchases.');
     await _iap.restorePurchases(
-      applicationUserName: isApple ? appleAccountToken(user.uid) : null,
+      applicationUserName: isApple
+          ? appleAccountToken(user.uid)
+          : playAccountBinding(user.uid),
     );
     await _retryDeferred();
     _events.add(const PurchaseUiEvent(PurchaseEventKind.syncComplete));
@@ -230,8 +237,9 @@ class IapPurchaseService {
       }
 
       // Server confirmed the atomic credit grant (or confirmed it was already
-      // granted). Only now acknowledge Apple's transaction.
-      await _completeIfRequired(purchase);
+      // granted). Apple is acknowledged here; Android was consumed server-side
+      // only after the Firestore grant committed.
+      if (isApple) await _completeIfRequired(purchase);
       _deferred.remove(key);
 
       final added = (body['creditsAdded'] as num?)?.toInt() ?? 0;
@@ -358,4 +366,7 @@ class IapPurchaseService {
         '${hex.substring(12, 16)}-${hex.substring(16, 20)}-'
         '${hex.substring(20)}';
   }
+
+  static String playAccountBinding(String uid) =>
+      sha256.convert(utf8.encode('vyro:$uid')).toString();
 }

@@ -1,0 +1,15 @@
+.env
+.env.*
+.venv/
+venv/
+__pycache__/
+secrets/
+serviceAccountKey.json
+firebase-service-account.json
+test_outputs/
+*.pyc
+*.log
+.git/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

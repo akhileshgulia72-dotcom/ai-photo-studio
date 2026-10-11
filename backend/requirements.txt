@@ -8,6 +8,7 @@ google-auth>=2.35,<3
 google-cloud-firestore==2.21.0
 google-cloud-storage==3.3.1
 app-store-server-library>=3.1.2,<4
+cryptography>=43.0.0
 numpy
 Pillow
 opencv-python-headless==4.10.0.84

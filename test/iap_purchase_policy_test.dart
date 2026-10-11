@@ -34,5 +34,19 @@ void main() {
       expect(IapPurchaseService.creatorCreditsFor(apple: false), 150);
       expect(IapPurchaseService.proCreditsFor(apple: false), 500);
     });
+
+    test('binds new Play purchases to a stable, non-PII account hash', () {
+      final binding = IapPurchaseService.playAccountBinding('test-user');
+      expect(
+        binding,
+        'db54755dfb343d5a3487b897a536fb602c5521de607f838c6c9228840de36b46',
+      );
+      expect(binding, IapPurchaseService.playAccountBinding('test-user'));
+      expect(
+        binding,
+        isNot(IapPurchaseService.playAccountBinding('other-user')),
+      );
+      expect(binding, isNot(contains('test-user')));
+    });
   });
 }
