@@ -921,14 +921,21 @@ jobs:
             --build-name=1.0.0 \
             --build-number="${GITHUB_RUN_NUMBER}" \
             --dart-define=GENERATION_API_BASE_URL="${GENERATION_API_BASE_URL}" \
-            --dart-define=ADMOB_USE_TEST_ADS=true
+            --dart-define=ADMOB_USE_TEST_ADS=false
 
-          echo "Test AdMob units enabled for this TestFlight validation build."
+          echo "Production AdMob units enabled for this release build."
 
           echo ""
           echo "DART_DEFINES written to Generated.xcconfig:"
           grep -c 'DART_DEFINES' ios/Flutter/Generated.xcconfig || true
           grep 'DART_DEFINES' ios/Flutter/Generated.xcconfig || true
+
+          # Fail if test-ad configuration is accidentally enabled in this release.
+          if grep -q 'ADMOB_USE_TEST_ADS=true' ios/Flutter/Generated.xcconfig; then
+            echo "ERROR: Test AdMob configuration detected in production release."
+            exit 1
+          fi
+          echo "Verified: production AdMob configuration is selected."
 
           echo ""
           echo "Build number Flutter wrote:"
